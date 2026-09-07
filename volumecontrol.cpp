@@ -273,6 +273,7 @@ void CreateVolumeWindow(HINSTANCE hInstance)
     wcVolume.style = CS_HREDRAW | CS_VREDRAW;
     wcVolume.lpfnWndProc = VolumeWndProc;
     wcVolume.hInstance = hInstance;
+    wcVolume.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wcVolume.hbrBackground = CreateSolidBrush(RGB(43, 43, 43));
     wcVolume.lpszClassName = L"VolumeDisplayClass";
     RegisterClassExW(&wcVolume);
@@ -996,6 +997,7 @@ void CreateSysMonitorWindow(HINSTANCE hInstance)
     wcMon.style         = CS_HREDRAW | CS_VREDRAW;
     wcMon.lpfnWndProc   = SysMonitorWndProc;
     wcMon.hInstance     = hInstance;
+    wcMon.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     wcMon.hbrBackground = CreateSolidBrush(g_taskbarBgColor);
     wcMon.lpszClassName = L"SysMonitorClass";
     RegisterClassExW(&wcMon);
