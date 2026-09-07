@@ -37,7 +37,7 @@ HWND g_hSysMonitorWnd = NULL;
 struct HardwareData {
     float CpuUsage;   // CPU 사용률 (%)
     float CpuTemp;    // CPU 온도 (C)
-    float CpuClock;   // CPU 클럭 (GHz)
+    float GpuMemUsedGB; // GPU 메모리 사용량 (GB)
     float GpuUsage;   // GPU 사용률 (%)
     float GpuTemp;    // GPU 온도 (C)
     float MemUsedGB;  // 메모리 사용량 (GB)
@@ -897,19 +897,20 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
             SetTextColor(memDC, (d.GpuUsage >= 70.0f) ? clrAlert : clrText);
             DrawTextW(memDC, szU2, -1, &rcU2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
-            // Col 3: CPU Clock & Mem Used (x: 178 .. 275)
+            // Col 3: Mem Used & GPU Mem Used (x: 178 .. 275)
             WCHAR szC1[64], szC2[64];
-            swprintf_s(szC1, L"CPU: %.2f GHz", d.CpuClock);
-            swprintf_s(szC2, L"Mem: %.2f GB", d.MemUsedGB);
+            swprintf_s(szC1, L"Mem: %.2f GB", d.MemUsedGB);
+            swprintf_s(szC2, L"VRAM: %.2f GB", d.GpuMemUsedGB);
 
             RECT rcC1 = { 178, r1, 275, r1 + lineH };
             RECT rcC2 = { 178, r2, 275, r2 + lineH };
 
-            SetTextColor(memDC, clrText);
-            DrawTextW(memDC, szC1, -1, &rcC1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
-
             // Memory >= 60% turns RED
             SetTextColor(memDC, (memLoad >= 60) ? clrAlert : clrText);
+            DrawTextW(memDC, szC1, -1, &rcC1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+
+            // VRAM (GPU Memory)
+            SetTextColor(memDC, clrText);
             DrawTextW(memDC, szC2, -1, &rcC2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
             // Col 4: Temperatures (x: 278 .. 365)

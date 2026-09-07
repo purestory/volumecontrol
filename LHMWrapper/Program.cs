@@ -13,7 +13,7 @@ struct HardwareData
 {
     public float CpuUsage;   // CPU 사용률 (%)
     public float CpuTemp;    // CPU 온도 (°C)
-    public float CpuClock;   // CPU 클럭 (GHz)
+    public float GpuMemUsedGB; // GPU 메모리 사용량 (GB)
     public float GpuUsage;   // GPU 사용률 (%)
     public float GpuTemp;    // GPU 온도 (°C)
     public float MemUsedGB;  // 메모리 사용량 (GB)
@@ -27,25 +27,7 @@ class Program
     const string MUTEX_NAME = "VolumeControlHWHostMutexV2";
     const int DATA_SIZE = 32;
 
-    [StructLayout(LayoutKind.Sequential)]
-    struct PROCESSOR_POWER_INFORMATION
-    {
-        public uint Number;
-        public uint MaxMhz;
-        public uint CurrentMhz;
-        public uint MhzLimit;
-        public uint MaxIdleState;
-        public uint CurrentIdleState;
-    }
 
-    [DllImport("powrprof.dll", SetLastError = true)]
-    static extern int CallNtPowerInformation(
-        int informationLevel,
-        IntPtr inputBuffer,
-        uint inputBufferLength,
-        [Out] PROCESSOR_POWER_INFORMATION[] outputBuffer,
-        uint outputBufferLength
-    );
 
     [StructLayout(LayoutKind.Sequential)]
     struct MEMORYSTATUSEX
@@ -236,25 +218,7 @@ class Program
         data.CpuUsage = cpuUsage;
         data.CpuTemp = cpuTemp;
 
-        // 2. Exact CPU Clock via powrprof.dll (works 100% reliably in user mode)
-        try
-        {
-            int coreCount = Environment.ProcessorCount;
-            if (coreCount > 0)
-            {
-                var ppi = new PROCESSOR_POWER_INFORMATION[coreCount];
-                int size = Marshal.SizeOf<PROCESSOR_POWER_INFORMATION>() * coreCount;
-                int status = CallNtPowerInformation(11, IntPtr.Zero, 0, ppi, (uint)size);
-                if (status == 0)
-                {
-                    uint sumMhz = 0;
-                    for (int i = 0; i < coreCount; i++)
-                        sumMhz += ppi[i].CurrentMhz;
-                    data.CpuClock = (float)((double)sumMhz / coreCount / 1000.0);
-                }
-            }
-        }
-        catch { }
+
 
         // 3. GPU (Prefer NVIDIA discrete GPU, fallback to AMD/Intel)
         bool foundNvidia = false;
@@ -272,6 +236,8 @@ class Program
                             data.GpuUsage = v;
                         if (s.SensorType == SensorType.Temperature && (s.Name.Equals("GPU Core", StringComparison.OrdinalIgnoreCase) || s.Name.Contains("Core")))
                             data.GpuTemp = v;
+                        if (s.SensorType == SensorType.SmallData && s.Name.Contains("Memory Used"))
+                            data.GpuMemUsedGB = v / 1024f;
                     }
                     break;
                 }
@@ -290,6 +256,8 @@ class Program
                                 data.GpuUsage = v;
                             if (s.SensorType == SensorType.Temperature && (data.GpuTemp == 0f || s.Name.Contains("Core")))
                                 data.GpuTemp = v;
+                            if (s.SensorType == SensorType.SmallData && s.Name.Contains("Memory Used"))
+                                data.GpuMemUsedGB = v / 1024f;
                         }
                     }
                 }
