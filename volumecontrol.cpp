@@ -432,31 +432,33 @@ bool ChangeVolume(int delta)
         return false;
     }
 
-    DWORD currentTime = GetTickCount();
-    bool throttled = (currentTime - g_dwLastVolumeUpdate < VOLUME_THROTTLE_MS);
-
     float currentLevel = GetCurrentVolume();
-    float newLevel = currentLevel;
+    
+    // 지원: 부드러운 스크롤 마우스 (120 이하의 delta값도 정밀하게 볼륨 조절 가능)
+    float step = ((float)delta / 120.0f) * VOLUME_DELTA;
+    float newLevel = currentLevel + step;
 
-    if (!throttled) {
-        newLevel = currentLevel + (delta > 0 ? VOLUME_DELTA : -VOLUME_DELTA);
-        if (newLevel < 0.0f) newLevel = 0.0f;
-        if (newLevel > 1.0f) newLevel = 1.0f;
+    if (newLevel < 0.0f) newLevel = 0.0f;
+    if (newLevel > 1.0f) newLevel = 1.0f;
 
-        if (!SetVolume(newLevel)) {
-            if (!InitializeAudio()) {
-                return false;
-            }
-            if (!SetVolume(newLevel)) {
-                return false;
-            }
+    // 시스템이 음소거 상태일 경우 볼륨을 조절하면 즉시 음소거 해제 (표준 윈도우 동작)
+    BOOL isMuted = FALSE;
+    if (SUCCEEDED(g_pEndpointVolume->GetMute(&isMuted)) && isMuted) {
+        g_pEndpointVolume->SetMute(FALSE, NULL);
+    }
+
+    if (!SetVolume(newLevel)) {
+        if (!InitializeAudio()) {
+            return false;
         }
-        g_dwLastVolumeUpdate = currentTime;
+        if (!SetVolume(newLevel)) {
+            return false;
+        }
     }
 
     int volumePercent = (int)(newLevel * 100.0f + 0.5f);
     ShowVolumeDisplay(volumePercent);
-    return !throttled;
+    return true;
 }
 
 void HandleVolumeWheel(int delta)
