@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.13.35931.197 d17.13
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "volumecontrol", "volumecontrol.vcxproj", "{373F0A22-9B8F-4FCC-A0EB-A6907D5FF2F6}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Debug|x86 = Debug|x86
+		Release|x64 = Release|x64
+		Release|x86 = Release|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{373F0A22-9B8F-4FCC-A0EB-A6907D5FF2F6}.Debug|x64.ActiveCfg = Debug|x64
+		{373F0A22-9B8F-4FCC-A0EB-A6907D5FF2F6}.Debug|x64.Build.0 = Debug|x64
+		{373F0A22-9B8F-4FCC-A0EB-A6907D5FF2F6}.Debug|x86.ActiveCfg = Debug|Win32
+		{373F0A22-9B8F-4FCC-A0EB-A6907D5FF2F6}.Debug|x86.Build.0 = Debug|Win32
+		{373F0A22-9B8F-4FCC-A0EB-A6907D5FF2F6}.Release|x64.ActiveCfg = Release|x64
+		{373F0A22-9B8F-4FCC-A0EB-A6907D5FF2F6}.Release|x64.Build.0 = Release|x64
+		{373F0A22-9B8F-4FCC-A0EB-A6907D5FF2F6}.Release|x86.ActiveCfg = Release|Win32
+		{373F0A22-9B8F-4FCC-A0EB-A6907D5FF2F6}.Release|x86.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {EA663C8C-1FCB-4E96-B984-420AA6A701AB}
+	EndGlobalSection
+EndGlobal
