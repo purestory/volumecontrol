@@ -662,10 +662,9 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
         }
 
         short zDelta = (short)HIWORD(pMouseStruct->mouseData);
-        int delta = (zDelta > 0) ? 1 : -1;
 
         if (g_hWnd && IsWindow(g_hWnd)) {
-            PostMessageW(g_hWnd, WM_APP_VOLUME_WHEEL, (WPARAM)delta, 0);
+            PostMessageW(g_hWnd, WM_APP_VOLUME_WHEEL, (WPARAM)zDelta, 0);
             return 1;
         }
     }
