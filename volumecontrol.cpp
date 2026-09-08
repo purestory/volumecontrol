@@ -4,6 +4,11 @@
 #include "framework.h"
 #include "volumecontrol.h"
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(linker,"\"/manifestdependency:type='win32' \
+name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
+processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+
+#include <TlHelp32.h>
 
 #define MAX_LOADSTRING 100
 #define WM_APP_VOLUME_WHEEL (WM_APP + 1)
@@ -23,11 +28,22 @@ NOTIFYICONDATAW g_nid = { 0 };
 HHOOK g_hMouseHook = NULL;
 IAudioEndpointVolume* g_pEndpointVolume = NULL;
 bool g_bPreventScreensaver = false;
+bool g_bShowNetwork = true;
+bool g_bShowUsage = true;
+bool g_bShowMemory = true;
+bool g_bShowTemp = true;
+bool g_bDisableEfficiency = true;
 UINT_PTR g_nVolumeTimerId = 0;
 UINT_PTR g_nScreensaverTimerId = 0;
 int g_nCurrentVolume = 0;
 DWORD g_dwLastVolumeUpdate = 0;
 DWORD g_dwLastAudioCheck = 0;
+
+// Shutdown timer globals
+bool g_bShutdownTimerActive = false;
+int g_shutdownTimerSecondsLeft = 0;
+UINT_PTR g_nShutdownTimerId = 0;
+#define SHUTDOWN_TIMER_ID 4
 
 // SysMonitor globals
 HWND g_hSysMonitorWnd = NULL;
@@ -118,6 +134,8 @@ LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK VolumeWndProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK SysMonitorWndProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
+INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
+INT_PTR CALLBACK ShutdownTimerDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
 
 bool InitializeAudio();
 void UninitializeAudio();
@@ -148,6 +166,11 @@ bool IsTaskbarWindow(HWND hwnd);
 void ToggleScreensaverBlock();
 void HandleVolumeWheel(int delta);
 
+void LoadSettings();
+void SaveSettings();
+INT_PTR CALLBACK SettingsDlgProc(HWND, UINT, WPARAM, LPARAM);
+void UpdateSysMonitorLayout();
+void DisableEfficiencyMode();
 void LogDebug(const wchar_t* msg) {
     FILE* fp = NULL;
     _wfopen_s(&fp, L"d:\\coding\\visualstudio\\volumecontrol\\vc_debug.log", L"a, ccs=UTF-8");
@@ -209,6 +232,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     LaunchSysMonitorHost();
     LogDebug(L"LaunchSysMonitorHost done");
+
+    LoadSettings();
 
     CreateSysMonitorWindow(hInstance);
     LogDebug(L"CreateSysMonitorWindow done");
@@ -494,20 +519,17 @@ void RemoveTrayIcon()
 void ShowTrayMenu(HWND hWnd)
 {
     HMENU hMenu = CreatePopupMenu();
-
-    UINT autoStartFlags = MF_STRING;
-    if (IsAutoStartEnabled()) {
-        autoStartFlags |= MF_CHECKED;
+    if (g_bShutdownTimerActive) {
+        int h = g_shutdownTimerSecondsLeft / 3600;
+        int m = (g_shutdownTimerSecondsLeft % 3600) / 60;
+        int s = g_shutdownTimerSecondsLeft % 60;
+        WCHAR szTimer[64];
+        swprintf_s(szTimer, L"종료 타이머 취소 (%02d:%02d:%02d)", h, m, s);
+        AppendMenu(hMenu, MF_STRING, ID_TRAY_SHUTDOWNTIMER, szTimer);
+    } else {
+        AppendMenu(hMenu, MF_STRING, ID_TRAY_SHUTDOWNTIMER, L"종료 타이머...");
     }
-    AppendMenu(hMenu, autoStartFlags, ID_TRAY_AUTOSTART, L"Auto Start");
-
-    UINT screensaverFlags = MF_STRING;
-    if (g_bPreventScreensaver) {
-        screensaverFlags |= MF_CHECKED;
-    }
-    AppendMenu(hMenu, screensaverFlags, ID_TRAY_SCREENSAVER, L"Block Screensaver");
-
-    AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
     AppendMenu(hMenu, MF_STRING, ID_TRAY_EXIT, L"Exit");
 
     POINT pt;
@@ -535,14 +557,14 @@ bool IsAutoStartEnabled()
     return false;
 }
 
-void ToggleAutoStart()
+void SetAutoStart(bool bEnable)
 {
     HKEY hKey;
     if (RegOpenKeyEx(HKEY_CURRENT_USER,
         L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
         0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS)
     {
-        if (IsAutoStartEnabled()) {
+        if (!bEnable) {
             RegDeleteValue(hKey, L"VolumeControl");
         }
         else {
@@ -555,12 +577,14 @@ void ToggleAutoStart()
     }
 }
 
-void ToggleScreensaverBlock()
+void SetScreensaverBlock(bool bEnable)
 {
-    g_bPreventScreensaver = !g_bPreventScreensaver;
+    g_bPreventScreensaver = bEnable;
 
     if (g_bPreventScreensaver) {
-        g_nScreensaverTimerId = SetTimer(g_hWnd, 2, 30000, NULL);
+        if (!g_nScreensaverTimerId) {
+            g_nScreensaverTimerId = SetTimer(g_hWnd, 2, 30000, NULL);
+        }
         SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
     }
     else {
@@ -691,14 +715,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         int wmId = LOWORD(wParam);
         switch (wmId)
         {
+        case ID_TRAY_SETTINGS:
+            DialogBox(hInst, MAKEINTRESOURCE(IDD_SETTINGS), hWnd, SettingsDlgProc);
+            break;
+        case ID_TRAY_SHUTDOWNTIMER:
+            if (g_bShutdownTimerActive) {
+                KillTimer(hWnd, g_nShutdownTimerId);
+                g_bShutdownTimerActive = false;
+                g_nShutdownTimerId = 0;
+                wcscpy_s(g_nid.szTip, L"Volume Control");
+                Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+            } else {
+                DialogBox(hInst, MAKEINTRESOURCE(IDD_SHUTDOWNTIMER), hWnd, ShutdownTimerDlgProc);
+            }
+            break;
         case ID_TRAY_EXIT:
             DestroyWindow(hWnd);
-            break;
-        case ID_TRAY_AUTOSTART:
-            ToggleAutoStart();
-            break;
-        case ID_TRAY_SCREENSAVER:
-            ToggleScreensaverBlock();
             break;
         default:
             return DefWindowProc(hWnd, message, wParam, lParam);
@@ -707,7 +739,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     break;
 
     case WM_TIMER:
-        if (wParam == 2 && g_bPreventScreensaver) {
+        if (wParam == SHUTDOWN_TIMER_ID && g_bShutdownTimerActive) {
+            g_shutdownTimerSecondsLeft--;
+            if (g_shutdownTimerSecondsLeft <= 0) {
+                KillTimer(hWnd, g_nShutdownTimerId);
+                g_bShutdownTimerActive = false;
+                g_nShutdownTimerId = 0;
+                wcscpy_s(g_nid.szTip, L"Volume Control");
+                Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+                system("shutdown /s /t 0");
+            } else {
+                int h = g_shutdownTimerSecondsLeft / 3600;
+                int m = (g_shutdownTimerSecondsLeft % 3600) / 60;
+                int s = g_shutdownTimerSecondsLeft % 60;
+                swprintf_s(g_nid.szTip, L"Volume Control\n종료까지: %02d:%02d:%02d", h, m, s);
+                Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+            }
+        }
+        else if (wParam == 2 && g_bPreventScreensaver) {
             INPUT input = { 0 };
             input.type = INPUT_MOUSE;
             input.mi.dwFlags = MOUSEEVENTF_MOVE;
@@ -811,6 +860,12 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
     case WM_TIMER:
         if (wParam == 3) {
             if (!g_pHWData) OpenSharedMemory();
+            
+            // Check taskbar visibility for auto-hide or resolution changes
+            UpdateSysMonitorLayout();
+            
+            DisableEfficiencyMode();
+            
             InvalidateRect(hWnd, NULL, FALSE);
         }
         break;
@@ -861,74 +916,90 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 
         if (g_pHWData && g_pHWData->MemUsedGB > 0.0f) {
             HardwareData d = *g_pHWData;
+            int currentX = 10;
 
-            // Col 1: Network (x: 4 .. 100)
-            WCHAR szNet1[64], szNet2[64];
-            if (d.NetOutMBs < 1.0f)
-                swprintf_s(szNet1, L"\u2191: %.0f KB/s", d.NetOutMBs * 1024.0f);
-            else
-                swprintf_s(szNet1, L"\u2191: %.2f MB/s", d.NetOutMBs);
+            if (g_bShowNetwork) {
+                WCHAR szNet1V[32], szNet2V[32];
+                if (d.NetOutMBs < 1.0f)
+                    swprintf_s(szNet1V, L"%.0f KB/s", d.NetOutMBs * 1024.0f);
+                else
+                    swprintf_s(szNet1V, L"%.2f MB/s", d.NetOutMBs);
 
-            if (d.NetInMBs < 1.0f)
-                swprintf_s(szNet2, L"\u2193: %.0f KB/s", d.NetInMBs * 1024.0f);
-            else
-                swprintf_s(szNet2, L"\u2193: %.2f MB/s", d.NetInMBs);
+                if (d.NetInMBs < 1.0f)
+                    swprintf_s(szNet2V, L"%.0f KB/s", d.NetInMBs * 1024.0f);
+                else
+                    swprintf_s(szNet2V, L"%.2f MB/s", d.NetInMBs);
 
-            RECT rcN1 = { 4, r1, 100, r1 + lineH };
-            RECT rcN2 = { 4, r2, 100, r2 + lineH };
+                RECT rcN1 = { currentX, r1, currentX + 78, r1 + lineH };
+                RECT rcN2 = { currentX, r2, currentX + 78, r2 + lineH };
 
-            // Network speed >= 20 MB/s turns RED
-            SetTextColor(memDC, (d.NetOutMBs >= 20.0f) ? clrAlert : clrText);
-            DrawTextW(memDC, szNet1, -1, &rcN1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                SetTextColor(memDC, (d.NetOutMBs >= 20.0f) ? clrAlert : clrText);
+                DrawTextW(memDC, L"\u2191:", -1, &rcN1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(memDC, szNet1V, -1, &rcN1, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
 
-            SetTextColor(memDC, (d.NetInMBs >= 20.0f) ? clrAlert : clrText);
-            DrawTextW(memDC, szNet2, -1, &rcN2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                SetTextColor(memDC, (d.NetInMBs >= 20.0f) ? clrAlert : clrText);
+                DrawTextW(memDC, L"\u2193:", -1, &rcN2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(memDC, szNet2V, -1, &rcN2, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
 
-            // Col 2: CPU & GPU Usage (x: 104 .. 175)
-            WCHAR szU1[64], szU2[64];
-            swprintf_s(szU1, L"CPU: %d %%", (int)(d.CpuUsage + 0.5f));
-            swprintf_s(szU2, L"GPU: %d %%", (int)(d.GpuUsage + 0.5f));
+                currentX += 78 + 20;
+            }
 
-            RECT rcU1 = { 104, r1, 175, r1 + lineH };
-            RECT rcU2 = { 104, r2, 175, r2 + lineH };
+            if (g_bShowUsage) {
+                WCHAR szU1V[32], szU2V[32];
+                swprintf_s(szU1V, L"%d %%", (int)(d.CpuUsage + 0.5f));
+                swprintf_s(szU2V, L"%d %%", (int)(d.GpuUsage + 0.5f));
 
-            // Usage >= 70% (or 80%) turns RED
-            SetTextColor(memDC, (d.CpuUsage >= 70.0f) ? clrAlert : clrText);
-            DrawTextW(memDC, szU1, -1, &rcU1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                RECT rcU1 = { currentX, r1, currentX + 56, r1 + lineH };
+                RECT rcU2 = { currentX, r2, currentX + 56, r2 + lineH };
 
-            SetTextColor(memDC, (d.GpuUsage >= 70.0f) ? clrAlert : clrText);
-            DrawTextW(memDC, szU2, -1, &rcU2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                SetTextColor(memDC, (d.CpuUsage >= 70.0f) ? clrAlert : clrText);
+                DrawTextW(memDC, L"CPU:", -1, &rcU1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(memDC, szU1V, -1, &rcU1, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
 
-            // Col 3: Mem Used & GPU Mem Used (x: 178 .. 275)
-            WCHAR szC1[64], szC2[64];
-            swprintf_s(szC1, L"Mem: %.2f GB", d.MemUsedGB);
-            swprintf_s(szC2, L"VRAM: %.2f GB", d.GpuMemUsedGB);
+                SetTextColor(memDC, (d.GpuUsage >= 70.0f) ? clrAlert : clrText);
+                DrawTextW(memDC, L"GPU:", -1, &rcU2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(memDC, szU2V, -1, &rcU2, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
 
-            RECT rcC1 = { 178, r1, 275, r1 + lineH };
-            RECT rcC2 = { 178, r2, 275, r2 + lineH };
+                currentX += 56 + 20;
+            }
 
-            // Memory >= 60% turns RED
-            SetTextColor(memDC, (memLoad >= 60) ? clrAlert : clrText);
-            DrawTextW(memDC, szC1, -1, &rcC1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+            if (g_bShowMemory) {
+                WCHAR szC1V[32], szC2V[32];
+                swprintf_s(szC1V, L"%.2f GB", d.MemUsedGB);
+                swprintf_s(szC2V, L"%.2f GB", d.GpuMemUsedGB);
 
-            // VRAM (GPU Memory)
-            SetTextColor(memDC, clrText);
-            DrawTextW(memDC, szC2, -1, &rcC2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                RECT rcC1 = { currentX, r1, currentX + 86, r1 + lineH };
+                RECT rcC2 = { currentX, r2, currentX + 86, r2 + lineH };
 
-            // Col 4: Temperatures (x: 278 .. 365)
-            WCHAR szT1[64], szT2[64];
-            swprintf_s(szT1, L"CPU: %d \u00B0C", (int)(d.CpuTemp + 0.5f));
-            swprintf_s(szT2, L"GPU: %d \u00B0C", (int)(d.GpuTemp + 0.5f));
+                SetTextColor(memDC, (memLoad >= 60) ? clrAlert : clrText);
+                DrawTextW(memDC, L"Mem:", -1, &rcC1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(memDC, szC1V, -1, &rcC1, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
 
-            RECT rcT1 = { 278, r1, 365, r1 + lineH };
-            RECT rcT2 = { 278, r2, 365, r2 + lineH };
+                SetTextColor(memDC, clrText);
+                DrawTextW(memDC, L"VRAM:", -1, &rcC2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(memDC, szC2V, -1, &rcC2, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
 
-            // Temperature >= 90°C turns RED, otherwise normal text color
-            SetTextColor(memDC, (d.CpuTemp >= 90.0f) ? clrAlert : clrText);
-            DrawTextW(memDC, szT1, -1, &rcT1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                currentX += 86 + 20;
+            }
 
-            SetTextColor(memDC, (d.GpuTemp >= 90.0f) ? clrAlert : clrText);
-            DrawTextW(memDC, szT2, -1, &rcT2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+            if (g_bShowTemp) {
+                WCHAR szT1V[32], szT2V[32];
+                swprintf_s(szT1V, L"%d \u00B0C", (int)(d.CpuTemp + 0.5f));
+                swprintf_s(szT2V, L"%d \u00B0C", (int)(d.GpuTemp + 0.5f));
+
+                RECT rcT1 = { currentX, r1, currentX + 62, r1 + lineH };
+                RECT rcT2 = { currentX, r2, currentX + 62, r2 + lineH };
+
+                SetTextColor(memDC, (d.CpuTemp >= 90.0f) ? clrAlert : clrText);
+                DrawTextW(memDC, L"CPU:", -1, &rcT1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(memDC, szT1V, -1, &rcT1, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
+
+                SetTextColor(memDC, (d.GpuTemp >= 90.0f) ? clrAlert : clrText);
+                DrawTextW(memDC, L"GPU:", -1, &rcT2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(memDC, szT2V, -1, &rcT2, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
+
+                currentX += 62 + 20;
+            }
         }
         else {
             SetTextColor(memDC, isLight ? RGB(100, 100, 100) : RGB(160, 160, 160));
@@ -961,36 +1032,176 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
     return 0;
 }
 
-void CreateSysMonitorWindow(HINSTANCE hInstance)
+void LoadSettings()
 {
-    HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", NULL);
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\VolumeControlHW\\Settings", 0, NULL, 0, KEY_READ, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        DWORD val = 1, sz = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, L"ShowNetwork", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS) g_bShowNetwork = (val != 0);
+        sz = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, L"ShowUsage", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS) g_bShowUsage = (val != 0);
+        sz = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, L"ShowMemory", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS) g_bShowMemory = (val != 0);
+        sz = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, L"ShowTemp", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS) g_bShowTemp = (val != 0);
+        sz = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, L"DisableEfficiency", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS) g_bDisableEfficiency = (val != 0);
+        sz = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, L"PreventScreensaver", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS) {
+            bool bPrevent = (val != 0);
+            if (bPrevent) {
+                SetScreensaverBlock(true);
+            }
+        }
+        RegCloseKey(hKey);
+    }
+}
 
-    int width = 365;
-    int height = 40;
+void SaveSettings()
+{
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\VolumeControlHW\\Settings", 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        DWORD val;
+        val = g_bShowNetwork ? 1 : 0; RegSetValueExW(hKey, L"ShowNetwork", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+        val = g_bShowUsage ? 1 : 0; RegSetValueExW(hKey, L"ShowUsage", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+        val = g_bShowMemory ? 1 : 0; RegSetValueExW(hKey, L"ShowMemory", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+        val = g_bShowTemp ? 1 : 0; RegSetValueExW(hKey, L"ShowTemp", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+        val = g_bDisableEfficiency ? 1 : 0; RegSetValueExW(hKey, L"DisableEfficiency", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+        val = g_bPreventScreensaver ? 1 : 0; RegSetValueExW(hKey, L"PreventScreensaver", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+}
+
+void UpdateSysMonitorLayout()
+{
+    if (!g_hSysMonitorWnd) return;
+
+    int newWidth = 0;
+    if (g_bShowNetwork) newWidth += 78 + 20;
+    if (g_bShowUsage) newWidth += 56 + 20;
+    if (g_bShowMemory) newWidth += 86 + 20;
+    if (g_bShowTemp) newWidth += 62 + 20;
+    
+    if (newWidth > 0) newWidth = newWidth - 20 + 22;
+    else newWidth = 100;
+
+    HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", NULL);
     int xPos = 0, yPos = 0;
+    int height = 40;
 
     if (hTaskbar) {
         RECT rcTaskbar;
         GetWindowRect(hTaskbar, &rcTaskbar);
         height = rcTaskbar.bottom - rcTaskbar.top;
         if (height < 36) height = 36;
+        
         yPos = rcTaskbar.top;
 
-        // Position moved further right (directly left of the tray icons)
-        xPos = rcTaskbar.right - width - 240;
+        xPos = rcTaskbar.right - newWidth - 240;
 
         HWND hTrayNotify = FindWindowExW(hTaskbar, NULL, L"TrayNotifyWnd", NULL);
         if (hTrayNotify) {
             RECT rcTrayNotify = { 0 };
             GetWindowRect(hTrayNotify, &rcTrayNotify);
-            if (rcTrayNotify.left > rcTaskbar.left + width) {
-                xPos = rcTrayNotify.left - width - 8;
+            
+            if (rcTrayNotify.left > rcTaskbar.left + newWidth) {
+                xPos = rcTrayNotify.left - newWidth - 8;
             }
         }
-
         if (xPos < 0) xPos = 0;
     }
+    SetWindowPos(g_hSysMonitorWnd, NULL, xPos, yPos, newWidth, height, SWP_NOACTIVATE | SWP_NOZORDER);
+    InvalidateRect(g_hSysMonitorWnd, NULL, TRUE);
+}
 
+INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message)
+    {
+    case WM_INITDIALOG:
+        CheckDlgButton(hDlg, IDC_CHK_AUTOSTART, IsAutoStartEnabled() ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_CHK_SCREENSAVER, g_bPreventScreensaver ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_CHK_NETWORK, g_bShowNetwork ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_CHK_USAGE, g_bShowUsage ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_CHK_MEMORY, g_bShowMemory ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_CHK_TEMP, g_bShowTemp ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_CHK_EFFICIENCY, g_bDisableEfficiency ? BST_CHECKED : BST_UNCHECKED);
+        return (INT_PTR)TRUE;
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK)
+        {
+            bool newAutoStart = (IsDlgButtonChecked(hDlg, IDC_CHK_AUTOSTART) == BST_CHECKED);
+            if (newAutoStart != IsAutoStartEnabled()) {
+                SetAutoStart(newAutoStart);
+            }
+            bool newScreensaver = (IsDlgButtonChecked(hDlg, IDC_CHK_SCREENSAVER) == BST_CHECKED);
+            if (newScreensaver != g_bPreventScreensaver) {
+                SetScreensaverBlock(newScreensaver);
+            }
+
+            g_bShowNetwork = (IsDlgButtonChecked(hDlg, IDC_CHK_NETWORK) == BST_CHECKED);
+            g_bShowUsage = (IsDlgButtonChecked(hDlg, IDC_CHK_USAGE) == BST_CHECKED);
+            g_bShowMemory = (IsDlgButtonChecked(hDlg, IDC_CHK_MEMORY) == BST_CHECKED);
+            g_bShowTemp = (IsDlgButtonChecked(hDlg, IDC_CHK_TEMP) == BST_CHECKED);
+            g_bDisableEfficiency = (IsDlgButtonChecked(hDlg, IDC_CHK_EFFICIENCY) == BST_CHECKED);
+            SaveSettings();
+            UpdateSysMonitorLayout();
+            EndDialog(hDlg, LOWORD(wParam));
+            return (INT_PTR)TRUE;
+        }
+        else if (LOWORD(wParam) == IDCANCEL)
+        {
+            EndDialog(hDlg, LOWORD(wParam));
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+    return (INT_PTR)FALSE;
+}
+
+INT_PTR CALLBACK ShutdownTimerDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message)
+    {
+    case WM_INITDIALOG:
+        SetDlgItemInt(hDlg, IDC_EDIT_HOURS, 0, FALSE);
+        SetDlgItemInt(hDlg, IDC_EDIT_MINUTES, 0, FALSE);
+        SetDlgItemInt(hDlg, IDC_EDIT_SECONDS, 0, FALSE);
+        return (INT_PTR)TRUE;
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK)
+        {
+            BOOL bTranslated;
+            int h = GetDlgItemInt(hDlg, IDC_EDIT_HOURS, &bTranslated, FALSE);
+            int m = GetDlgItemInt(hDlg, IDC_EDIT_MINUTES, &bTranslated, FALSE);
+            int s = GetDlgItemInt(hDlg, IDC_EDIT_SECONDS, &bTranslated, FALSE);
+            
+            int totalSeconds = h * 3600 + m * 60 + s;
+            if (totalSeconds > 0) {
+                g_shutdownTimerSecondsLeft = totalSeconds;
+                g_bShutdownTimerActive = true;
+                g_nShutdownTimerId = SetTimer(g_hWnd, SHUTDOWN_TIMER_ID, 1000, NULL);
+                
+                swprintf_s(g_nid.szTip, L"Volume Control\n종료까지: %02d:%02d:%02d", h, m, s);
+                Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+            }
+            EndDialog(hDlg, LOWORD(wParam));
+            return (INT_PTR)TRUE;
+        }
+        else if (LOWORD(wParam) == IDCANCEL)
+        {
+            EndDialog(hDlg, LOWORD(wParam));
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+    return (INT_PTR)FALSE;
+}
+
+void CreateSysMonitorWindow(HINSTANCE hInstance)
+{
     UpdateTaskbarColors();
 
     WNDCLASSEXW wcMon = { 0 };
@@ -1003,19 +1214,22 @@ void CreateSysMonitorWindow(HINSTANCE hInstance)
     wcMon.lpszClassName = L"SysMonitorClass";
     RegisterClassExW(&wcMon);
 
+    HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", NULL);
+
     g_hSysMonitorWnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        WS_EX_TOOLWINDOW | WS_EX_LAYERED,
         L"SysMonitorClass",
         L"",
         WS_POPUP | WS_CLIPSIBLINGS,
-        xPos, yPos, width, height,
-        hTaskbar ? hTaskbar : NULL,
+        0, 0, 100, 40,
+        hTaskbar, // Owner is taskbar: keeps it naturally above taskbar
         NULL, hInstance, NULL
     );
 
     if (g_hSysMonitorWnd) {
-        SetWindowPos(g_hSysMonitorWnd, HWND_TOPMOST, xPos, yPos, width, height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SetLayeredWindowAttributes(g_hSysMonitorWnd, g_taskbarBgColor, 0, LWA_COLORKEY);
+        UpdateSysMonitorLayout();
+        ShowWindow(g_hSysMonitorWnd, SW_SHOWNOACTIVATE);
         OpenSharedMemory();
         SetTimer(g_hSysMonitorWnd, 3, 1000, NULL);
     }
@@ -1062,4 +1276,37 @@ void TerminateSysMonitorHost()
         CloseHandle(g_hHostProcess);
         g_hHostProcess = NULL;
     }
+}
+
+void DisableEfficiencyMode()
+{
+    if (!g_bDisableEfficiency) return;
+
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) return;
+
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
+
+    if (Process32FirstW(hSnapshot, &pe32)) {
+        do {
+            if (_wcsicmp(pe32.szExeFile, L"chrome.exe") == 0 ||
+                _wcsicmp(pe32.szExeFile, L"msedge.exe") == 0) {
+                
+                HANDLE hProcess = OpenProcess(PROCESS_SET_INFORMATION, FALSE, pe32.th32ProcessID);
+                if (hProcess) {
+                    PROCESS_POWER_THROTTLING_STATE PowerThrottling;
+                    RtlZeroMemory(&PowerThrottling, sizeof(PowerThrottling));
+                    PowerThrottling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+                    PowerThrottling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+                    PowerThrottling.StateMask = 0; // Turn off efficiency mode
+                    
+                    SetProcessInformation(hProcess, ProcessPowerThrottling, &PowerThrottling, sizeof(PowerThrottling));
+                    CloseHandle(hProcess);
+                }
+            }
+        } while (Process32NextW(hSnapshot, &pe32));
+    }
+
+    CloseHandle(hSnapshot);
 }
