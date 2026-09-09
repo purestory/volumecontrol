@@ -543,16 +543,16 @@ void ShowTrayMenu(HWND hWnd)
 
 bool IsAutoStartEnabled()
 {
-    HKEY hKey;
-    if (RegOpenKeyEx(HKEY_CURRENT_USER,
-        L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-        0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        WCHAR szPath[MAX_PATH];
-        DWORD dwSize = sizeof(szPath);
-        LONG result = RegQueryValueEx(hKey, L"VolumeControl", NULL, NULL, (LPBYTE)szPath, &dwSize);
-        RegCloseKey(hKey);
-        return (result == ERROR_SUCCESS);
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = { 0 };
+    WCHAR cmd[] = L"schtasks.exe /query /tn \"VolumeControl\"";
+    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        DWORD exitCode = 1;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return (exitCode == 0);
     }
     return false;
 }
@@ -560,20 +560,32 @@ bool IsAutoStartEnabled()
 void SetAutoStart(bool bEnable)
 {
     HKEY hKey;
-    if (RegOpenKeyEx(HKEY_CURRENT_USER,
-        L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-        0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS)
-    {
-        if (!bEnable) {
-            RegDeleteValue(hKey, L"VolumeControl");
-        }
-        else {
-            WCHAR szPath[MAX_PATH];
-            GetModuleFileName(NULL, szPath, MAX_PATH);
-            RegSetValueEx(hKey, L"VolumeControl", 0, REG_SZ,
-                (LPBYTE)szPath, (DWORD)(wcslen(szPath) + 1) * sizeof(WCHAR));
-        }
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS) {
+        RegDeleteValue(hKey, L"VolumeControl");
         RegCloseKey(hKey);
+    }
+
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = { 0 };
+
+    if (!bEnable) {
+        WCHAR cmd[] = L"schtasks.exe /delete /tn \"VolumeControl\" /f";
+        if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+    }
+    else {
+        WCHAR szPath[MAX_PATH];
+        GetModuleFileNameW(NULL, szPath, MAX_PATH);
+        WCHAR cmd[MAX_PATH * 2];
+        swprintf_s(cmd, L"schtasks.exe /create /tn \"VolumeControl\" /tr \"\\\"%s\\\"\" /rl highest /sc onlogon /f", szPath);
+        if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
     }
 }
 
