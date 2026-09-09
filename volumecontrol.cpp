@@ -162,6 +162,7 @@ void TerminateSysMonitorHost();
 
 bool IsMouseOnTaskbar(POINT pt);
 bool IsTaskbarWindow(HWND hwnd);
+bool IsFullscreenAppRunning();
 
 void ToggleScreensaverBlock();
 void HandleVolumeWheel(int delta);
@@ -661,6 +662,37 @@ bool IsTaskbarWindow(HWND hwnd)
     return false;
 }
 
+bool IsFullscreenAppRunning()
+{
+    HWND hWnd = GetForegroundWindow();
+    if (!hWnd || hWnd == GetDesktopWindow() || hWnd == GetShellWindow()) {
+        return false;
+    }
+
+    RECT rcClient;
+    GetClientRect(hWnd, &rcClient);
+    POINT pt = { 0, 0 };
+    ClientToScreen(hWnd, &pt);
+    
+    int width = rcClient.right - rcClient.left;
+    int height = rcClient.bottom - rcClient.top;
+    
+    rcClient.left = pt.x;
+    rcClient.top = pt.y;
+    rcClient.right = pt.x + width;
+    rcClient.bottom = pt.y + height;
+
+    HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(mi) };
+    if (GetMonitorInfoW(hMonitor, &mi)) {
+        return (rcClient.left <= mi.rcMonitor.left &&
+                rcClient.top <= mi.rcMonitor.top &&
+                rcClient.right >= mi.rcMonitor.right &&
+                rcClient.bottom >= mi.rcMonitor.bottom);
+    }
+    return false;
+}
+
 bool IsMouseOnTaskbar(POINT pt)
 {
     HWND hwnd = WindowFromPoint(pt);
@@ -695,7 +727,7 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
         MSLLHOOKSTRUCT* pMouseStruct = (MSLLHOOKSTRUCT*)lParam;
         POINT pt = pMouseStruct->pt;
 
-        if (!IsMouseOnTaskbar(pt)) {
+        if (!IsMouseOnTaskbar(pt) || IsFullscreenAppRunning()) {
             return CallNextHookEx(g_hMouseHook, nCode, wParam, lParam);
         }
 
@@ -890,6 +922,17 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 
     case WM_TIMER:
         if (wParam == 3) {
+            if (IsFullscreenAppRunning()) {
+                if (IsWindowVisible(hWnd)) {
+                    ShowWindow(hWnd, SW_HIDE);
+                }
+                return 0;
+            } else {
+                if (!IsWindowVisible(hWnd)) {
+                    ShowWindow(hWnd, SW_SHOWNOACTIVATE);
+                }
+            }
+
             if (!g_pHWData) OpenSharedMemory();
             
             // Check taskbar visibility for auto-hide or resolution changes
