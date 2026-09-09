@@ -508,7 +508,9 @@ void CreateTrayIcon(HWND hWnd)
     g_nid.hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_VOLUMECONTROL));
     wcscpy_s(g_nid.szTip, L"Volume Control");
 
-    Shell_NotifyIconW(NIM_ADD, &g_nid);
+    if (!Shell_NotifyIconW(NIM_ADD, &g_nid)) {
+        SetTimer(hWnd, 5, 2000, NULL);
+    }
 }
 
 void RemoveTrayIcon()
@@ -710,6 +712,17 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    static UINT s_uTaskbarRestart = 0;
+    if (s_uTaskbarRestart == 0) {
+        s_uTaskbarRestart = RegisterWindowMessageW(L"TaskbarCreated");
+        ChangeWindowMessageFilter(s_uTaskbarRestart, MSGFLT_ADD);
+    }
+
+    if (message == s_uTaskbarRestart && s_uTaskbarRestart != 0) {
+        CreateTrayIcon(hWnd);
+        return 0;
+    }
+
     switch (message)
     {
     case WM_APP_VOLUME_WHEEL:
@@ -773,6 +786,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             input.type = INPUT_MOUSE;
             input.mi.dwFlags = MOUSEEVENTF_MOVE;
             SendInput(1, &input, sizeof(INPUT));
+        }
+        else if (wParam == 5) {
+            KillTimer(hWnd, 5);
+            if (!Shell_NotifyIconW(NIM_ADD, &g_nid)) {
+                SetTimer(hWnd, 5, 2000, NULL);
+            }
         }
         break;
 
