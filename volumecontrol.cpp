@@ -526,13 +526,13 @@ void ShowTrayMenu(HWND hWnd)
         int m = (g_shutdownTimerSecondsLeft % 3600) / 60;
         int s = g_shutdownTimerSecondsLeft % 60;
         WCHAR szTimer[64];
-        swprintf_s(szTimer, L"종료 타이머 취소 (%02d:%02d:%02d)", h, m, s);
+        swprintf_s(szTimer, L"컴퓨터 종료 타이머 취소 (%02d:%02d:%02d)", h, m, s);
         AppendMenu(hMenu, MF_STRING, ID_TRAY_SHUTDOWNTIMER, szTimer);
     } else {
-        AppendMenu(hMenu, MF_STRING, ID_TRAY_SHUTDOWNTIMER, L"종료 타이머...");
+        AppendMenu(hMenu, MF_STRING, ID_TRAY_SHUTDOWNTIMER, L"컴퓨터 종료 타이머...");
     }
-    AppendMenu(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
-    AppendMenu(hMenu, MF_STRING, ID_TRAY_EXIT, L"Exit");
+    AppendMenu(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"설정...");
+    AppendMenu(hMenu, MF_STRING, ID_TRAY_EXIT, L"종료");
 
     POINT pt;
     GetCursorPos(&pt);
