@@ -191,6 +191,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(lpCmdLine);
     UNREFERENCED_PARAMETER(nCmdShow);
 
+    // Prevent running in background sessions (e.g., from other users' Scheduled Tasks)
+    // to avoid locking WinRing0 driver and hiding the UI from the active user.
+    DWORD dwConsoleSessionId = WTSGetActiveConsoleSessionId();
+    DWORD dwCurrentSessionId = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &dwCurrentSessionId);
+    if (dwConsoleSessionId != 0xFFFFFFFF && dwCurrentSessionId != dwConsoleSessionId) {
+        return 0; // Exit silently
+    }
+
     LogDebug(L"wWinMain entered");
 
     HANDLE hMutex = CreateMutex(NULL, TRUE, L"VolumeControlMutex");
@@ -546,9 +555,16 @@ void ShowTrayMenu(HWND hWnd)
 
 bool IsAutoStartEnabled()
 {
+    WCHAR szUserName[256];
+    DWORD dwSize = 256;
+    GetUserNameW(szUserName, &dwSize);
+    WCHAR szTaskName[512];
+    swprintf_s(szTaskName, L"VolumeControl_%s", szUserName);
+
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = { 0 };
-    WCHAR cmd[] = L"schtasks.exe /query /tn \"VolumeControl\"";
+    WCHAR cmd[1024];
+    swprintf_s(cmd, L"schtasks.exe /query /tn \"%s\"", szTaskName);
     if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
         WaitForSingleObject(pi.hProcess, INFINITE);
         DWORD exitCode = 1;
@@ -568,11 +584,26 @@ void SetAutoStart(bool bEnable)
         RegCloseKey(hKey);
     }
 
+    WCHAR szUserName[256];
+    DWORD dwSize = 256;
+    GetUserNameW(szUserName, &dwSize);
+    WCHAR szTaskName[512];
+    swprintf_s(szTaskName, L"VolumeControl_%s", szUserName);
+
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = { 0 };
 
+    // Legacy task cleanup (just in case)
+    WCHAR cmdLegacy[] = L"schtasks.exe /delete /tn \"VolumeControl\" /f";
+    if (CreateProcessW(NULL, cmdLegacy, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+
     if (!bEnable) {
-        WCHAR cmd[] = L"schtasks.exe /delete /tn \"VolumeControl\" /f";
+        WCHAR cmd[1024];
+        swprintf_s(cmd, L"schtasks.exe /delete /tn \"%s\" /f", szTaskName);
         if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
             WaitForSingleObject(pi.hProcess, INFINITE);
             CloseHandle(pi.hProcess);
@@ -582,8 +613,8 @@ void SetAutoStart(bool bEnable)
     else {
         WCHAR szPath[MAX_PATH];
         GetModuleFileNameW(NULL, szPath, MAX_PATH);
-        WCHAR cmd[MAX_PATH * 2];
-        swprintf_s(cmd, L"schtasks.exe /create /tn \"VolumeControl\" /tr \"\\\"%s\\\"\" /rl highest /sc onlogon /f", szPath);
+        WCHAR cmd[2048];
+        swprintf_s(cmd, L"schtasks.exe /create /tn \"%s\" /tr \"\\\"%s\\\"\" /rl highest /sc onlogon /f", szTaskName, szPath);
         if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
             WaitForSingleObject(pi.hProcess, INFINITE);
             CloseHandle(pi.hProcess);
@@ -916,6 +947,10 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
         ChangeVolume(delta);
         return 0;
     }
+
+    case WM_RBUTTONUP:
+        ShowTrayMenu(g_hWnd);
+        return 0;
 
     case WM_ERASEBKGND:
         return 1; // Prevent background erasing to eliminate flicker
