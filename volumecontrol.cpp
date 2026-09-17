@@ -191,6 +191,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(lpCmdLine);
     UNREFERENCED_PARAMETER(nCmdShow);
 
+    // DPI 인식을 활성화하여 높은 DPI 화면에서 폰트가 번지거나 흐릿하게 보이는 현상 방지
+    SetProcessDPIAware();
+
     // Prevent running in background sessions (e.g., from other users' Scheduled Tasks)
     // to avoid locking WinRing0 driver and hiding the UI from the active user.
     DWORD dwConsoleSessionId = WTSGetActiveConsoleSessionId();
@@ -695,6 +698,16 @@ bool IsTaskbarWindow(HWND hwnd)
 
 bool IsFullscreenAppRunning()
 {
+    QUERY_USER_NOTIFICATION_STATE state;
+    if (SUCCEEDED(SHQueryUserNotificationState(&state))) {
+        if (state == QUNS_RUNNING_D3D_FULL_SCREEN || 
+            state == QUNS_PRESENTATION_MODE || 
+            state == QUNS_BUSY) 
+        {
+            return true;
+        }
+    }
+
     HWND hWnd = GetForegroundWindow();
     if (!hWnd || hWnd == GetDesktopWindow() || hWnd == GetShellWindow()) {
         return false;
