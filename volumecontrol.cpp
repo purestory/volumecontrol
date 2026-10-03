@@ -796,6 +796,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
     if (message == s_uTaskbarRestart && s_uTaskbarRestart != 0) {
         CreateTrayIcon(hWnd);
+        if (g_hSysMonitorWnd && IsWindow(g_hSysMonitorWnd)) {
+            DestroyWindow(g_hSysMonitorWnd);
+        }
+        CreateSysMonitorWindow(hInst);
         return 0;
     }
 
@@ -1145,6 +1149,7 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
         if (hWnd == g_hSysMonitorWnd) {
             KillTimer(hWnd, 3);
             CloseSharedMemory();
+            g_hSysMonitorWnd = NULL;
         }
         break;
 
@@ -1212,6 +1217,12 @@ void UpdateSysMonitorLayout()
     int height = 40;
 
     if (hTaskbar) {
+        HWND hCurrentOwner = GetWindow(g_hSysMonitorWnd, GW_OWNER);
+        if (hCurrentOwner != hTaskbar) {
+            SetWindowLongPtr(g_hSysMonitorWnd, GWLP_HWNDPARENT, (LONG_PTR)hTaskbar);
+            SetWindowPos(g_hSysMonitorWnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+
         RECT rcTaskbar;
         GetWindowRect(hTaskbar, &rcTaskbar);
         height = rcTaskbar.bottom - rcTaskbar.top;
@@ -1327,14 +1338,16 @@ void CreateSysMonitorWindow(HINSTANCE hInstance)
     UpdateTaskbarColors();
 
     WNDCLASSEXW wcMon = { 0 };
-    wcMon.cbSize        = sizeof(WNDCLASSEX);
-    wcMon.style         = CS_HREDRAW | CS_VREDRAW;
-    wcMon.lpfnWndProc   = SysMonitorWndProc;
-    wcMon.hInstance     = hInstance;
-    wcMon.hCursor       = LoadCursor(nullptr, IDC_ARROW);
-    wcMon.hbrBackground = CreateSolidBrush(g_taskbarBgColor);
-    wcMon.lpszClassName = L"SysMonitorClass";
-    RegisterClassExW(&wcMon);
+    if (!GetClassInfoExW(hInstance, L"SysMonitorClass", &wcMon)) {
+        wcMon.cbSize        = sizeof(WNDCLASSEX);
+        wcMon.style         = CS_HREDRAW | CS_VREDRAW;
+        wcMon.lpfnWndProc   = SysMonitorWndProc;
+        wcMon.hInstance     = hInstance;
+        wcMon.hCursor       = LoadCursor(nullptr, IDC_ARROW);
+        wcMon.hbrBackground = CreateSolidBrush(g_taskbarBgColor);
+        wcMon.lpszClassName = L"SysMonitorClass";
+        RegisterClassExW(&wcMon);
+    }
 
     HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", NULL);
 
