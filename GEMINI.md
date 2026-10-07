@@ -33,3 +33,8 @@ Win32 C++ 프로젝트 개발 시 소프트웨어의 완성도를 높이기 위�
 3. **데이터 수집 시 레지스트리 유연한 파싱 (Fallback 구현)**
    - Windows 레지스트리를 통해 프로그램 정보 등을 조회할 때, `InstallLocation` 같은 표준 키는 비어있거나 누락된 경우가 매우 많습니다.
    - 항상 특정 키 값이 비어있을 것을 가정하고, `UninstallString`이나 `DisplayIcon` 같은 다른 문자열에서 `.exe` 경로와 디렉토리를 역추적해내는 **Fallback(예비) 로직**을 반드시 구현하여 데이터 수집의 정확도와 안정성을 높이세요.
+
+4. **투명 윈도우 (LWA_COLORKEY)에서의 폰트 렌더링 최적화**
+   - `LWA_COLORKEY`를 사용하여 배경을 투명하게 만드는 레이어드 윈도우(Layered Window)에 텍스트를 출력할 때, `CreateFont`의 파라미터로 `CLEARTYPE_QUALITY`를 사용하면 안 됩니다.
+   - ClearType의 서브픽셀 렌더링이 배경색과 혼합되면서 투명화 처리(Color Key)가 제대로 되지 않아 글씨 외곽이 번지거나 두껍게 나오는 현상(Color Fringing)이 발생합니다.
+   - 이 경우 반드시 `ANTIALIASED_QUALITY`를 사용하여 그레이스케일 안티앨리어싱을 적용함으로써 텍스트 렌더링 품질을 유지하고 투명화가 깔끔하게 되도록 해야 합니다.

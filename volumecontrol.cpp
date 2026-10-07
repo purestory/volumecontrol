@@ -1016,8 +1016,8 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
         SetBkMode(memDC, TRANSPARENT);
 
         // Font: Malgun Gothic (맑은 고딕) - clean, readable, crisp glyphs
-        // 폰트 품질을 ANTIALIASED_QUALITY로 변경하여 ColorKey 렌더링 시 투명화 테두리에
-        // ClearType 특유의 서브픽셀 컬러(빨강/파랑)가 섞여서 글씨가 번지거나 두꺼워지는 현상 방지
+        // 폰트가 지저분하게 보인다는 피드백에 따라 CLEARTYPE_QUALITY로 변경하여
+        // 텍스트 렌더링 품질을 개선합니다. (가독성 향상)
         HFONT hFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
             ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Malgun Gothic");
