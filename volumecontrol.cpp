@@ -11,7 +11,8 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #include <TlHelp32.h>
 
 #define MAX_LOADSTRING 100
-#define WM_APP_VOLUME_WHEEL (WM_APP + 1)
+#define WM_APP_VOLUME_WHEEL   (WM_APP + 1)
+#define WM_APP_DEVICE_CHANGED (WM_APP + 2)
 
 #define VOLUME_DELTA        0.02f
 #define VOLUME_THROTTLE_MS  50
@@ -27,11 +28,59 @@ HWND g_hVolumeWnd = NULL;
 NOTIFYICONDATAW g_nid = { 0 };
 HHOOK g_hMouseHook = NULL;
 IAudioEndpointVolume* g_pEndpointVolume = NULL;
+IMMDeviceEnumerator* g_pEnumerator = NULL;
+class CAudioNotificationClient;
+CAudioNotificationClient* g_pNotificationClient = NULL;
+volatile LONG g_lAudioDeviceChanged = 0;
+std::wstring g_strCurrentDeviceId;
+#define WM_APP_REORDER_METRIC (WM_APP + 10)
+
+enum MetricType {
+    METRIC_NET_OUT = 0,   // 업로드 속도 (↑)
+    METRIC_NET_IN = 1,    // 다운로드 속도 (↓)
+    METRIC_CPU_USAGE = 2, // CPU 사용률
+    METRIC_GPU_USAGE = 3, // GPU 사용률
+    METRIC_RAM_USED = 4,  // 메모리 사용량 (RAM)
+    METRIC_GPU_MEM = 5,   // GPU 메모리 (VRAM)
+    METRIC_CPU_TEMP = 6,  // CPU 온도
+    METRIC_GPU_TEMP = 7,  // GPU 온도
+    METRIC_COUNT = 8
+};
+
+struct MetricItem {
+    MetricType type;
+    bool enabled;
+};
+
+struct MetricInfo {
+    const wchar_t* name;
+    const wchar_t* label;
+    int defaultWidth;
+};
+
+const MetricInfo g_metricMetadata[METRIC_COUNT] = {
+    { L"↑ 업로드",   L"\u2191:", 78 },
+    { L"↓ 다운로드", L"\u2193:", 78 },
+    { L"CPU 사용률", L"CPU:",    56 },
+    { L"GPU 사용률", L"GPU:",    56 },
+    { L"RAM 메모리", L"Mem:",    86 },
+    { L"VRAM",       L"VRAM:",   86 },
+    { L"CPU 온도",   L"CPU:",    62 },
+    { L"GPU 온도",   L"GPU:",    62 }
+};
+
+MetricItem g_metricItems[METRIC_COUNT] = {
+    { METRIC_NET_OUT, true },
+    { METRIC_NET_IN, true },
+    { METRIC_CPU_USAGE, true },
+    { METRIC_GPU_USAGE, true },
+    { METRIC_RAM_USED, true },
+    { METRIC_GPU_MEM, true },
+    { METRIC_CPU_TEMP, true },
+    { METRIC_GPU_TEMP, true }
+};
+
 bool g_bPreventScreensaver = false;
-bool g_bShowNetwork = true;
-bool g_bShowUsage = true;
-bool g_bShowMemory = true;
-bool g_bShowTemp = true;
 bool g_bDisableEfficiency = true;
 UINT_PTR g_nVolumeTimerId = 0;
 UINT_PTR g_nScreensaverTimerId = 0;
@@ -136,6 +185,7 @@ LRESULT CALLBACK SysMonitorWndProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK ShutdownTimerDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK MetricGridWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 bool InitializeAudio();
 void UninitializeAudio();
@@ -194,6 +244,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     // DPI 인식을 활성화하여 높은 DPI 화면에서 폰트가 번지거나 흐릿하게 보이는 현상 방지
     SetProcessDPIAware();
 
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES };
+    InitCommonControlsEx(&icc);
+
     // Prevent running in background sessions (e.g., from other users' Scheduled Tasks)
     // to avoid locking WinRing0 driver and hiding the UI from the active user.
     DWORD dwConsoleSessionId = WTSGetActiveConsoleSessionId();
@@ -224,6 +277,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     LoadStringW(hInstance, IDC_VOLUMECONTROL, szWindowClass, MAX_LOADSTRING);
     MyRegisterClass(hInstance);
     LogDebug(L"MyRegisterClass done");
+
+    WNDCLASSEXW wcGrid = { 0 };
+    wcGrid.cbSize = sizeof(WNDCLASSEX);
+    wcGrid.style = CS_HREDRAW | CS_VREDRAW;
+    wcGrid.lpfnWndProc = MetricGridWndProc;
+    wcGrid.hInstance = hInstance;
+    wcGrid.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wcGrid.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wcGrid.lpszClassName = L"MetricGridClass";
+    RegisterClassExW(&wcGrid);
 
     if (!InitInstance(hInstance, SW_HIDE)) {
         LogDebug(L"InitInstance failed!");
@@ -375,6 +438,76 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
     return TRUE;
 }
 
+class CAudioNotificationClient : public IMMNotificationClient
+{
+    LONG m_cRef;
+public:
+    CAudioNotificationClient() : m_cRef(1) {}
+    virtual ~CAudioNotificationClient() {}
+
+    // IUnknown methods
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return InterlockedIncrement(&m_cRef);
+    }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG ulRef = InterlockedDecrement(&m_cRef);
+        if (ulRef == 0) {
+            delete this;
+        }
+        return ulRef;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, VOID** ppvInterface) override {
+        if (!ppvInterface) return E_POINTER;
+        if (riid == __uuidof(IUnknown)) {
+            AddRef();
+            *ppvInterface = static_cast<IUnknown*>(this);
+            return S_OK;
+        }
+        if (riid == __uuidof(IMMNotificationClient)) {
+            AddRef();
+            *ppvInterface = static_cast<IMMNotificationClient*>(this);
+            return S_OK;
+        }
+        *ppvInterface = NULL;
+        return E_NOINTERFACE;
+    }
+
+    // IMMNotificationClient methods
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR pwstrDefaultDeviceId) override {
+        if (flow == eRender && (role == eConsole || role == eMultimedia)) {
+            InterlockedExchange(&g_lAudioDeviceChanged, 1);
+            if (g_hWnd && IsWindow(g_hWnd)) {
+                PostMessageW(g_hWnd, WM_APP_DEVICE_CHANGED, 0, 0);
+            }
+        }
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR pwstrDeviceId, DWORD dwNewState) override {
+        InterlockedExchange(&g_lAudioDeviceChanged, 1);
+        if (g_hWnd && IsWindow(g_hWnd)) {
+            PostMessageW(g_hWnd, WM_APP_DEVICE_CHANGED, 0, 0);
+        }
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR pwstrDeviceId) override {
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR pwstrDeviceId) override {
+        InterlockedExchange(&g_lAudioDeviceChanged, 1);
+        if (g_hWnd && IsWindow(g_hWnd)) {
+            PostMessageW(g_hWnd, WM_APP_DEVICE_CHANGED, 0, 0);
+        }
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR pwstrDeviceId, const PROPERTYKEY key) override {
+        return S_OK;
+    }
+};
+
 bool InitializeAudio()
 {
     if (g_pEndpointVolume) {
@@ -382,23 +515,49 @@ bool InitializeAudio()
         g_pEndpointVolume = NULL;
     }
 
-    IMMDeviceEnumerator* pEnumerator = NULL;
+    if (!g_pEnumerator) {
+        HRESULT hr = CoCreateInstance(
+            __uuidof(MMDeviceEnumerator),
+            NULL,
+            CLSCTX_ALL,
+            __uuidof(IMMDeviceEnumerator),
+            (void**)&g_pEnumerator
+        );
+        if (FAILED(hr) || !g_pEnumerator) return false;
+
+        if (!g_pNotificationClient) {
+            g_pNotificationClient = new CAudioNotificationClient();
+            HRESULT hrCb = g_pEnumerator->RegisterEndpointNotificationCallback(g_pNotificationClient);
+            if (FAILED(hrCb)) {
+                g_pNotificationClient->Release();
+                g_pNotificationClient = NULL;
+            }
+        }
+    }
+
     IMMDevice* pDevice = NULL;
-
-    HRESULT hr = CoCreateInstance(
-        __uuidof(MMDeviceEnumerator),
-        NULL,
-        CLSCTX_ALL,
-        __uuidof(IMMDeviceEnumerator),
-        (void**)&pEnumerator
-    );
-
-    if (FAILED(hr)) return false;
-
-    hr = pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice);
-    if (FAILED(hr)) {
-        pEnumerator->Release();
+    HRESULT hr = g_pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice);
+    if (FAILED(hr) || !pDevice) {
+        // If enumerator is stale or disconnected (other than no devices present), reset enumerator
+        if (hr != E_NOTFOUND) {
+            if (g_pNotificationClient) {
+                g_pEnumerator->UnregisterEndpointNotificationCallback(g_pNotificationClient);
+                g_pNotificationClient->Release();
+                g_pNotificationClient = NULL;
+            }
+            g_pEnumerator->Release();
+            g_pEnumerator = NULL;
+        }
+        g_strCurrentDeviceId.clear();
         return false;
+    }
+
+    LPWSTR pstrId = NULL;
+    if (SUCCEEDED(pDevice->GetId(&pstrId)) && pstrId) {
+        g_strCurrentDeviceId = pstrId;
+        CoTaskMemFree(pstrId);
+    } else {
+        g_strCurrentDeviceId.clear();
     }
 
     hr = pDevice->Activate(
@@ -409,7 +568,6 @@ bool InitializeAudio()
     );
 
     pDevice->Release();
-    pEnumerator->Release();
 
     return SUCCEEDED(hr) && g_pEndpointVolume != NULL;
 }
@@ -420,27 +578,61 @@ void UninitializeAudio()
         g_pEndpointVolume->Release();
         g_pEndpointVolume = NULL;
     }
+    if (g_pEnumerator) {
+        if (g_pNotificationClient) {
+            g_pEnumerator->UnregisterEndpointNotificationCallback(g_pNotificationClient);
+            g_pNotificationClient->Release();
+            g_pNotificationClient = NULL;
+        }
+        g_pEnumerator->Release();
+        g_pEnumerator = NULL;
+    }
+    g_strCurrentDeviceId.clear();
 }
 
 bool EnsureAudio()
 {
+    bool needRefresh = (InterlockedCompareExchange(&g_lAudioDeviceChanged, 0, 1) == 1);
     DWORD now = GetTickCount();
-    if (g_pEndpointVolume && (now - g_dwLastAudioCheck < AUDIO_CHECK_MS)) {
+
+    if (!needRefresh && g_pEndpointVolume && (now - g_dwLastAudioCheck < AUDIO_CHECK_MS)) {
         return true;
     }
     g_dwLastAudioCheck = now;
 
-    if (g_pEndpointVolume) {
-        float level = 0.0f;
-        HRESULT hr = g_pEndpointVolume->GetMasterVolumeLevelScalar(&level);
-        if (SUCCEEDED(hr)) {
-            return true;
+    if (!needRefresh && g_pEndpointVolume) {
+        // Fallback: Check if default audio endpoint ID has changed
+        if (g_pEnumerator) {
+            IMMDevice* pDefaultDev = NULL;
+            HRESULT hr = g_pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pDefaultDev);
+            if (SUCCEEDED(hr) && pDefaultDev) {
+                LPWSTR pstrId = NULL;
+                if (SUCCEEDED(pDefaultDev->GetId(&pstrId)) && pstrId) {
+                    if (g_strCurrentDeviceId.empty() || wcscmp(g_strCurrentDeviceId.c_str(), pstrId) != 0) {
+                        needRefresh = true;
+                    }
+                    CoTaskMemFree(pstrId);
+                }
+                pDefaultDev->Release();
+            } else {
+                needRefresh = true;
+            }
         }
-        g_pEndpointVolume->Release();
-        g_pEndpointVolume = NULL;
+
+        if (!needRefresh) {
+            float level = 0.0f;
+            HRESULT hr = g_pEndpointVolume->GetMasterVolumeLevelScalar(&level);
+            if (FAILED(hr)) {
+                needRefresh = true;
+            }
+        }
     }
 
-    return InitializeAudio();
+    if (needRefresh || !g_pEndpointVolume) {
+        return InitializeAudio();
+    }
+
+    return true;
 }
 
 float GetCurrentVolume()
@@ -809,6 +1001,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         HandleVolumeWheel((int)wParam);
         return 0;
 
+    case WM_APP_DEVICE_CHANGED:
+        EnsureAudio();
+        return 0;
+
     case WM_TRAYICON:
         if (lParam == WM_RBUTTONUP) {
             ShowTrayMenu(hWnd);
@@ -950,6 +1146,205 @@ LRESULT CALLBACK VolumeWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
     return 0;
 }
 
+struct ColumnLayout {
+    int x;
+    int width;
+    int topItemIndex;
+    int bottomItemIndex;
+};
+
+void GetMetricDisplay(MetricType type, const HardwareData* pData, DWORD memLoad, bool isPreview,
+                      std::wstring& outLabel, std::wstring& outValue, bool& outAlert)
+{
+    outLabel = g_metricMetadata[type].label;
+    outAlert = false;
+
+    HardwareData dummyData = {
+        18.0f,  // CpuUsage: 18%
+        48.0f,  // CpuTemp: 48 C
+        3.20f,  // GpuMemUsedGB: 3.20 GB
+        35.0f,  // GpuUsage: 35%
+        52.0f,  // GpuTemp: 52 C
+        8.50f,  // MemUsedGB: 8.50 GB
+        2.50f,  // NetInMBs: 2.50 MB/s
+        1.20f   // NetOutMBs: 1.20 MB/s
+    };
+    DWORD dummyMemLoad = 45;
+
+    const HardwareData* d = (pData && pData->MemUsedGB > 0.0f) ? pData : &dummyData;
+    DWORD ml = (pData && pData->MemUsedGB > 0.0f) ? memLoad : dummyMemLoad;
+
+    WCHAR buf[64];
+    switch (type) {
+    case METRIC_NET_OUT:
+        if (d->NetOutMBs < 1.0f)
+            swprintf_s(buf, L"%.0f KB/s", d->NetOutMBs * 1024.0f);
+        else
+            swprintf_s(buf, L"%.2f MB/s", d->NetOutMBs);
+        outValue = buf;
+        outAlert = (d->NetOutMBs >= 20.0f);
+        break;
+
+    case METRIC_NET_IN:
+        if (d->NetInMBs < 1.0f)
+            swprintf_s(buf, L"%.0f KB/s", d->NetInMBs * 1024.0f);
+        else
+            swprintf_s(buf, L"%.2f MB/s", d->NetInMBs);
+        outValue = buf;
+        outAlert = (d->NetInMBs >= 20.0f);
+        break;
+
+    case METRIC_CPU_USAGE:
+        swprintf_s(buf, L"%d %%", (int)(d->CpuUsage + 0.5f));
+        outValue = buf;
+        outAlert = (d->CpuUsage >= 70.0f);
+        break;
+
+    case METRIC_GPU_USAGE:
+        swprintf_s(buf, L"%d %%", (int)(d->GpuUsage + 0.5f));
+        outValue = buf;
+        outAlert = (d->GpuUsage >= 70.0f);
+        break;
+
+    case METRIC_RAM_USED:
+        swprintf_s(buf, L"%.2f GB", d->MemUsedGB);
+        outValue = buf;
+        outAlert = (ml >= 60);
+        break;
+
+    case METRIC_GPU_MEM:
+        swprintf_s(buf, L"%.2f GB", d->GpuMemUsedGB);
+        outValue = buf;
+        outAlert = false;
+        break;
+
+    case METRIC_CPU_TEMP:
+        swprintf_s(buf, L"%d \u00B0C", (int)(d->CpuTemp + 0.5f));
+        outValue = buf;
+        outAlert = (d->CpuTemp >= 90.0f);
+        break;
+
+    case METRIC_GPU_TEMP:
+        swprintf_s(buf, L"%d \u00B0C", (int)(d->GpuTemp + 0.5f));
+        outValue = buf;
+        outAlert = (d->GpuTemp >= 90.0f);
+        break;
+    }
+}
+
+int CalculateColumnsLayout(const MetricItem* items, int count, int startX, int colSpacing, std::vector<ColumnLayout>& outCols)
+{
+    outCols.clear();
+    int currentX = startX;
+
+    for (int col = 0; col < 4; col++) {
+        int topIdx = col * 2;
+        int btmIdx = col * 2 + 1;
+        bool topEn = items[topIdx].enabled;
+        bool btmEn = items[btmIdx].enabled;
+
+        if (!topEn && !btmEn) {
+            continue;
+        }
+
+        ColumnLayout c;
+        c.x = currentX;
+        c.topItemIndex = topEn ? topIdx : -1;
+        c.bottomItemIndex = btmEn ? btmIdx : -1;
+
+        int wTop = topEn ? g_metricMetadata[items[topIdx].type].defaultWidth : 0;
+        int wBtm = btmEn ? g_metricMetadata[items[btmIdx].type].defaultWidth : 0;
+        c.width = (wTop > wBtm) ? wTop : wBtm;
+
+        outCols.push_back(c);
+        currentX += c.width + colSpacing;
+    }
+
+    if (outCols.empty()) {
+        return 0;
+    }
+    return (currentX - colSpacing - startX);
+}
+
+void RenderMonitoringDisplay(HDC hdc, const RECT& rc, const MetricItem* items, bool isPreview)
+{
+    HBRUSH hBgBrush = CreateSolidBrush(g_taskbarBgColor);
+    FillRect(hdc, &rc, hBgBrush);
+    DeleteObject(hBgBrush);
+
+    SetBkMode(hdc, TRANSPARENT);
+
+    HFONT hFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+        ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Malgun Gothic");
+    HFONT oldFont = (HFONT)SelectObject(hdc, hFont);
+
+    TEXTMETRICW tm;
+    GetTextMetricsW(hdc, &tm);
+    int lineH = tm.tmHeight + 2;
+    int totalTextH = lineH * 2;
+    int yStart = (rc.bottom - rc.top - totalTextH) / 2;
+    if (yStart < 1) yStart = 1;
+
+    int r1 = rc.top + yStart;
+    int r2 = r1 + lineH;
+
+    bool isLight = IsWindowsLightTheme();
+    COLORREF clrText  = isLight ? RGB(20, 20, 20)  : RGB(245, 245, 245);
+    COLORREF clrAlert = isLight ? RGB(225, 10, 10) : RGB(255, 50, 50);
+
+    MEMORYSTATUSEX ms = { sizeof(ms) };
+    GlobalMemoryStatusEx(&ms);
+    DWORD memLoad = ms.dwMemoryLoad;
+
+    std::vector<ColumnLayout> cols;
+    int startX = rc.left + 10;
+    CalculateColumnsLayout(items, METRIC_COUNT, startX, 20, cols);
+
+    if (cols.empty()) {
+        SetTextColor(hdc, isLight ? RGB(120, 120, 120) : RGB(160, 160, 160));
+        RECT rcEmpty = { rc.left + 10, r1, rc.right - 10, r1 + lineH };
+        DrawTextW(hdc, L"표시할 모니터링 항목이 없습니다.", -1, &rcEmpty, DT_LEFT | DT_SINGLELINE);
+    }
+    else if (!isPreview && (!g_pHWData || g_pHWData->MemUsedGB <= 0.0f)) {
+        SetTextColor(hdc, isLight ? RGB(100, 100, 100) : RGB(160, 160, 160));
+        RECT rcWait = { rc.left + 6, r1, rc.right, r1 + lineH };
+        DrawTextW(hdc, L"Waiting for hardware data...", -1, &rcWait, DT_LEFT | DT_SINGLELINE);
+    }
+    else {
+        for (const auto& col : cols) {
+            if (col.topItemIndex >= 0) {
+                std::wstring lbl, val;
+                bool alert = false;
+                GetMetricDisplay(items[col.topItemIndex].type, g_pHWData, memLoad, isPreview, lbl, val, alert);
+
+                int yTop = (col.bottomItemIndex >= 0) ? r1 : (rc.top + (rc.bottom - rc.top - lineH) / 2);
+                RECT rcCell = { col.x, yTop, col.x + col.width, yTop + lineH };
+
+                SetTextColor(hdc, alert ? clrAlert : clrText);
+                DrawTextW(hdc, lbl.c_str(), -1, &rcCell, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(hdc, val.c_str(), -1, &rcCell, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
+            }
+
+            if (col.bottomItemIndex >= 0) {
+                std::wstring lbl, val;
+                bool alert = false;
+                GetMetricDisplay(items[col.bottomItemIndex].type, g_pHWData, memLoad, isPreview, lbl, val, alert);
+
+                int yBtm = (col.topItemIndex >= 0) ? r2 : (rc.top + (rc.bottom - rc.top - lineH) / 2);
+                RECT rcCell = { col.x, yBtm, col.x + col.width, yBtm + lineH };
+
+                SetTextColor(hdc, alert ? clrAlert : clrText);
+                DrawTextW(hdc, lbl.c_str(), -1, &rcCell, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(hdc, val.c_str(), -1, &rcCell, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
+            }
+        }
+    }
+
+    SelectObject(hdc, oldFont);
+    DeleteObject(hFont);
+}
+
 LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
@@ -960,8 +1355,7 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
     case WM_MOUSEWHEEL:
     {
         short zDelta = (short)HIWORD(wParam);
-        int delta = (zDelta > 0) ? 1 : -1;
-        ChangeVolume(delta);
+        ChangeVolume((int)zDelta);
         return 0;
     }
 
@@ -1008,137 +1402,10 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
         HBITMAP memBmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
         HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
 
-        // Fill background with taskbar color
-        HBRUSH hBgBrush = CreateSolidBrush(g_taskbarBgColor);
-        FillRect(memDC, &rc, hBgBrush);
-        DeleteObject(hBgBrush);
-
-        SetBkMode(memDC, TRANSPARENT);
-
-        // Font: Malgun Gothic (맑은 고딕) - clean, readable, crisp glyphs
-        // 폰트가 지저분하게 보인다는 피드백에 따라 CLEARTYPE_QUALITY로 변경하여
-        // 텍스트 렌더링 품질을 개선합니다. (가독성 향상)
-        HFONT hFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-            ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Malgun Gothic");
-        HFONT oldFont = (HFONT)SelectObject(memDC, hFont);
-
-        // Calculate text metrics for perfect vertical centering
-        TEXTMETRICW tm;
-        GetTextMetricsW(memDC, &tm);
-        int lineH = tm.tmHeight + 2;
-        int totalTextH = lineH * 2;
-        int yStart = (rc.bottom - totalTextH) / 2;
-        if (yStart < 1) yStart = 1;
-
-        int r1 = yStart;
-        int r2 = yStart + lineH;
-
-        bool isLight = IsWindowsLightTheme();
-        COLORREF clrText  = isLight ? RGB(20, 20, 20)  : RGB(245, 245, 245);
-        COLORREF clrAlert = isLight ? RGB(225, 10, 10) : RGB(255, 50, 50);
-
-        MEMORYSTATUSEX ms = { sizeof(ms) };
-        GlobalMemoryStatusEx(&ms);
-        DWORD memLoad = ms.dwMemoryLoad;
-
-        if (g_pHWData && g_pHWData->MemUsedGB > 0.0f) {
-            HardwareData d = *g_pHWData;
-            int currentX = 10;
-
-            if (g_bShowNetwork) {
-                WCHAR szNet1V[32], szNet2V[32];
-                if (d.NetOutMBs < 1.0f)
-                    swprintf_s(szNet1V, L"%.0f KB/s", d.NetOutMBs * 1024.0f);
-                else
-                    swprintf_s(szNet1V, L"%.2f MB/s", d.NetOutMBs);
-
-                if (d.NetInMBs < 1.0f)
-                    swprintf_s(szNet2V, L"%.0f KB/s", d.NetInMBs * 1024.0f);
-                else
-                    swprintf_s(szNet2V, L"%.2f MB/s", d.NetInMBs);
-
-                RECT rcN1 = { currentX, r1, currentX + 78, r1 + lineH };
-                RECT rcN2 = { currentX, r2, currentX + 78, r2 + lineH };
-
-                SetTextColor(memDC, (d.NetOutMBs >= 20.0f) ? clrAlert : clrText);
-                DrawTextW(memDC, L"\u2191:", -1, &rcN1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
-                DrawTextW(memDC, szNet1V, -1, &rcN1, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
-
-                SetTextColor(memDC, (d.NetInMBs >= 20.0f) ? clrAlert : clrText);
-                DrawTextW(memDC, L"\u2193:", -1, &rcN2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
-                DrawTextW(memDC, szNet2V, -1, &rcN2, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
-
-                currentX += 78 + 20;
-            }
-
-            if (g_bShowUsage) {
-                WCHAR szU1V[32], szU2V[32];
-                swprintf_s(szU1V, L"%d %%", (int)(d.CpuUsage + 0.5f));
-                swprintf_s(szU2V, L"%d %%", (int)(d.GpuUsage + 0.5f));
-
-                RECT rcU1 = { currentX, r1, currentX + 56, r1 + lineH };
-                RECT rcU2 = { currentX, r2, currentX + 56, r2 + lineH };
-
-                SetTextColor(memDC, (d.CpuUsage >= 70.0f) ? clrAlert : clrText);
-                DrawTextW(memDC, L"CPU:", -1, &rcU1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
-                DrawTextW(memDC, szU1V, -1, &rcU1, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
-
-                SetTextColor(memDC, (d.GpuUsage >= 70.0f) ? clrAlert : clrText);
-                DrawTextW(memDC, L"GPU:", -1, &rcU2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
-                DrawTextW(memDC, szU2V, -1, &rcU2, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
-
-                currentX += 56 + 20;
-            }
-
-            if (g_bShowMemory) {
-                WCHAR szC1V[32], szC2V[32];
-                swprintf_s(szC1V, L"%.2f GB", d.MemUsedGB);
-                swprintf_s(szC2V, L"%.2f GB", d.GpuMemUsedGB);
-
-                RECT rcC1 = { currentX, r1, currentX + 86, r1 + lineH };
-                RECT rcC2 = { currentX, r2, currentX + 86, r2 + lineH };
-
-                SetTextColor(memDC, (memLoad >= 60) ? clrAlert : clrText);
-                DrawTextW(memDC, L"Mem:", -1, &rcC1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
-                DrawTextW(memDC, szC1V, -1, &rcC1, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
-
-                SetTextColor(memDC, clrText);
-                DrawTextW(memDC, L"VRAM:", -1, &rcC2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
-                DrawTextW(memDC, szC2V, -1, &rcC2, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
-
-                currentX += 86 + 20;
-            }
-
-            if (g_bShowTemp) {
-                WCHAR szT1V[32], szT2V[32];
-                swprintf_s(szT1V, L"%d \u00B0C", (int)(d.CpuTemp + 0.5f));
-                swprintf_s(szT2V, L"%d \u00B0C", (int)(d.GpuTemp + 0.5f));
-
-                RECT rcT1 = { currentX, r1, currentX + 62, r1 + lineH };
-                RECT rcT2 = { currentX, r2, currentX + 62, r2 + lineH };
-
-                SetTextColor(memDC, (d.CpuTemp >= 90.0f) ? clrAlert : clrText);
-                DrawTextW(memDC, L"CPU:", -1, &rcT1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
-                DrawTextW(memDC, szT1V, -1, &rcT1, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
-
-                SetTextColor(memDC, (d.GpuTemp >= 90.0f) ? clrAlert : clrText);
-                DrawTextW(memDC, L"GPU:", -1, &rcT2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
-                DrawTextW(memDC, szT2V, -1, &rcT2, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
-
-                currentX += 62 + 20;
-            }
-        }
-        else {
-            SetTextColor(memDC, isLight ? RGB(100, 100, 100) : RGB(160, 160, 160));
-            RECT rcWait = { 6, r1, rc.right, r1 + lineH };
-            DrawTextW(memDC, L"Waiting for hardware data...", -1, &rcWait, DT_LEFT | DT_SINGLELINE);
-        }
+        RenderMonitoringDisplay(memDC, rc, g_metricItems, false);
 
         BitBlt(hdc, 0, 0, rc.right, rc.bottom, memDC, 0, 0, SRCCOPY);
 
-        SelectObject(memDC, oldFont);
-        DeleteObject(hFont);
         SelectObject(memDC, oldBmp);
         DeleteObject(memBmp);
         DeleteDC(memDC);
@@ -1166,20 +1433,59 @@ void LoadSettings()
     HKEY hKey;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\VolumeControlHW\\Settings", 0, NULL, 0, KEY_READ, NULL, &hKey, NULL) == ERROR_SUCCESS) {
         DWORD val = 1, sz = sizeof(DWORD);
-        if (RegQueryValueExW(hKey, L"ShowNetwork", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS) g_bShowNetwork = (val != 0);
-        sz = sizeof(DWORD);
-        if (RegQueryValueExW(hKey, L"ShowUsage", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS) g_bShowUsage = (val != 0);
-        sz = sizeof(DWORD);
-        if (RegQueryValueExW(hKey, L"ShowMemory", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS) g_bShowMemory = (val != 0);
-        sz = sizeof(DWORD);
-        if (RegQueryValueExW(hKey, L"ShowTemp", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS) g_bShowTemp = (val != 0);
-        sz = sizeof(DWORD);
         if (RegQueryValueExW(hKey, L"DisableEfficiency", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS) g_bDisableEfficiency = (val != 0);
         sz = sizeof(DWORD);
         if (RegQueryValueExW(hKey, L"PreventScreensaver", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS) {
             bool bPrevent = (val != 0);
             if (bPrevent) {
                 SetScreensaverBlock(true);
+            }
+        }
+
+        WCHAR szOrder[128] = { 0 };
+        DWORD dwSize = sizeof(szOrder);
+        if (RegQueryValueExW(hKey, L"MetricOrderV2", NULL, NULL, (LPBYTE)szOrder, &dwSize) == ERROR_SUCCESS && wcslen(szOrder) > 0) {
+            std::wstring s(szOrder);
+            size_t start = 0;
+            int count = 0;
+            while (start < s.length() && count < METRIC_COUNT) {
+                size_t comma = s.find(L',', start);
+                std::wstring token = (comma == std::wstring::npos) ? s.substr(start) : s.substr(start, comma - start);
+                size_t colon = token.find(L':');
+                if (colon != std::wstring::npos) {
+                    int type = _wtoi(token.substr(0, colon).c_str());
+                    int en = _wtoi(token.substr(colon + 1).c_str());
+                    if (type >= 0 && type < METRIC_COUNT) {
+                        g_metricItems[count].type = (MetricType)type;
+                        g_metricItems[count].enabled = (en != 0);
+                        count++;
+                    }
+                }
+                if (comma == std::wstring::npos) break;
+                start = comma + 1;
+            }
+        }
+        else {
+            DWORD oldNet = 1, oldUsage = 1, oldMem = 1, oldTemp = 1;
+            sz = sizeof(DWORD);
+            if (RegQueryValueExW(hKey, L"ShowNetwork", NULL, NULL, (LPBYTE)&oldNet, &sz) == ERROR_SUCCESS) {
+                g_metricItems[0].enabled = (oldNet != 0);
+                g_metricItems[1].enabled = (oldNet != 0);
+            }
+            sz = sizeof(DWORD);
+            if (RegQueryValueExW(hKey, L"ShowUsage", NULL, NULL, (LPBYTE)&oldUsage, &sz) == ERROR_SUCCESS) {
+                g_metricItems[2].enabled = (oldUsage != 0);
+                g_metricItems[3].enabled = (oldUsage != 0);
+            }
+            sz = sizeof(DWORD);
+            if (RegQueryValueExW(hKey, L"ShowMemory", NULL, NULL, (LPBYTE)&oldMem, &sz) == ERROR_SUCCESS) {
+                g_metricItems[4].enabled = (oldMem != 0);
+                g_metricItems[5].enabled = (oldMem != 0);
+            }
+            sz = sizeof(DWORD);
+            if (RegQueryValueExW(hKey, L"ShowTemp", NULL, NULL, (LPBYTE)&oldTemp, &sz) == ERROR_SUCCESS) {
+                g_metricItems[6].enabled = (oldTemp != 0);
+                g_metricItems[7].enabled = (oldTemp != 0);
             }
         }
         RegCloseKey(hKey);
@@ -1191,12 +1497,18 @@ void SaveSettings()
     HKEY hKey;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\VolumeControlHW\\Settings", 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
         DWORD val;
-        val = g_bShowNetwork ? 1 : 0; RegSetValueExW(hKey, L"ShowNetwork", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
-        val = g_bShowUsage ? 1 : 0; RegSetValueExW(hKey, L"ShowUsage", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
-        val = g_bShowMemory ? 1 : 0; RegSetValueExW(hKey, L"ShowMemory", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
-        val = g_bShowTemp ? 1 : 0; RegSetValueExW(hKey, L"ShowTemp", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
         val = g_bDisableEfficiency ? 1 : 0; RegSetValueExW(hKey, L"DisableEfficiency", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
         val = g_bPreventScreensaver ? 1 : 0; RegSetValueExW(hKey, L"PreventScreensaver", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+
+        std::wstring sOrder;
+        for (int i = 0; i < METRIC_COUNT; i++) {
+            if (i > 0) sOrder += L",";
+            sOrder += std::to_wstring((int)g_metricItems[i].type);
+            sOrder += L":";
+            sOrder += g_metricItems[i].enabled ? L"1" : L"0";
+        }
+        RegSetValueExW(hKey, L"MetricOrderV2", 0, REG_SZ, (LPBYTE)sOrder.c_str(), (DWORD)((sOrder.length() + 1) * sizeof(wchar_t)));
+
         RegCloseKey(hKey);
     }
 }
@@ -1205,14 +1517,14 @@ void UpdateSysMonitorLayout()
 {
     if (!g_hSysMonitorWnd) return;
 
+    std::vector<ColumnLayout> cols;
+    int contentWidth = CalculateColumnsLayout(g_metricItems, METRIC_COUNT, 10, 20, cols);
     int newWidth = 0;
-    if (g_bShowNetwork) newWidth += 78 + 20;
-    if (g_bShowUsage) newWidth += 56 + 20;
-    if (g_bShowMemory) newWidth += 86 + 20;
-    if (g_bShowTemp) newWidth += 62 + 20;
-    
-    if (newWidth > 0) newWidth = newWidth - 20 + 22;
-    else newWidth = 100;
+    if (contentWidth > 0) {
+        newWidth = 10 + contentWidth + 12;
+    } else {
+        newWidth = 100;
+    }
 
     HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", NULL);
     int xPos = 0, yPos = 0;
@@ -1250,22 +1562,305 @@ void UpdateSysMonitorLayout()
     InvalidateRect(g_hSysMonitorWnd, NULL, TRUE);
 }
 
+static MetricItem s_dlgMetrics[METRIC_COUNT];
+
+int HitTestSlot(POINT pt, const RECT& rcClient)
+{
+    int gap = 6;
+    int availW = rcClient.right - rcClient.left - 8 - 3 * gap;
+    if (availW <= 0) return -1;
+    int colW = availW / 4;
+    int availH = rcClient.bottom - rcClient.top - 20 - gap;
+    if (availH <= 0) return -1;
+    int rowH = availH / 2;
+
+    for (int i = 0; i < METRIC_COUNT; i++) {
+        int col = i / 2;
+        int row = i % 2;
+        int x = 4 + col * (colW + gap);
+        int y = 16 + row * (rowH + gap);
+        RECT rcSlot = { x, y, x + colW, y + rowH };
+        if (PtInRect(&rcSlot, pt)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+LRESULT CALLBACK MetricGridWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    static int s_iDragSlot = -1;
+    static int s_iDropSlot = -1;
+    static int s_iHoverSlot = -1;
+    static bool s_bDragging = false;
+    static POINT s_ptDragStart = { 0, 0 };
+
+    switch (uMsg)
+    {
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_MOUSEMOVE:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        RECT rcClient;
+        GetClientRect(hWnd, &rcClient);
+
+        if ((wParam & MK_LBUTTON) && s_iDragSlot >= 0) {
+            if (!s_bDragging) {
+                int dx = abs(pt.x - s_ptDragStart.x);
+                int dy = abs(pt.y - s_ptDragStart.y);
+                if (dx >= 4 || dy >= 4) {
+                    s_bDragging = true;
+                    SetCapture(hWnd);
+                }
+            }
+            if (s_bDragging) {
+                int target = HitTestSlot(pt, rcClient);
+                if (target != s_iDropSlot) {
+                    s_iDropSlot = target;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+                SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+                return 0;
+            }
+        }
+        else {
+            int hover = HitTestSlot(pt, rcClient);
+            if (hover != s_iHoverSlot) {
+                s_iHoverSlot = hover;
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hWnd, 0 };
+            TrackMouseEvent(&tme);
+        }
+        break;
+    }
+
+    case WM_MOUSELEAVE:
+    {
+        if (s_iHoverSlot >= 0 && !s_bDragging) {
+            s_iHoverSlot = -1;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+        break;
+    }
+
+    case WM_LBUTTONDOWN:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        RECT rcClient;
+        GetClientRect(hWnd, &rcClient);
+        int hit = HitTestSlot(pt, rcClient);
+        if (hit >= 0) {
+            s_iDragSlot = hit;
+            s_iDropSlot = hit;
+            s_ptDragStart = pt;
+            s_bDragging = false;
+        }
+        break;
+    }
+
+    case WM_LBUTTONUP:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        RECT rcClient;
+        GetClientRect(hWnd, &rcClient);
+        HWND hDlg = GetParent(hWnd);
+
+        if (s_bDragging) {
+            ReleaseCapture();
+            SetCursor(LoadCursor(NULL, IDC_ARROW));
+            int target = HitTestSlot(pt, rcClient);
+            if (target >= 0 && target != s_iDragSlot) {
+                std::swap(s_dlgMetrics[s_iDragSlot], s_dlgMetrics[target]);
+            }
+            s_bDragging = false;
+            s_iDragSlot = -1;
+            s_iDropSlot = -1;
+            InvalidateRect(hWnd, NULL, FALSE);
+            InvalidateRect(GetDlgItem(hDlg, IDC_STATIC_PREVIEW), NULL, FALSE);
+            return 0;
+        }
+        else if (s_iDragSlot >= 0) {
+            int hit = HitTestSlot(pt, rcClient);
+            if (hit == s_iDragSlot) {
+                s_dlgMetrics[hit].enabled = !s_dlgMetrics[hit].enabled;
+                InvalidateRect(hWnd, NULL, FALSE);
+                InvalidateRect(GetDlgItem(hDlg, IDC_STATIC_PREVIEW), NULL, FALSE);
+            }
+        }
+        s_iDragSlot = -1;
+        s_iDropSlot = -1;
+        s_bDragging = false;
+        break;
+    }
+
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP memBmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
+
+        HBRUSH hBgBrush = (HBRUSH)(COLOR_BTNFACE + 1);
+        FillRect(memDC, &rc, hBgBrush);
+
+        SetBkMode(memDC, TRANSPARENT);
+
+        HFONT hFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+            ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Malgun Gothic");
+        HFONT hFontBold = CreateFontW(-12, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+            ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Malgun Gothic");
+        HFONT hFontSmall = CreateFontW(-10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+            ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Malgun Gothic");
+        HFONT oldFont = (HFONT)SelectObject(memDC, hFont);
+
+        bool isLight = IsWindowsLightTheme();
+        COLORREF clrHeader = RGB(130, 130, 130);
+        COLORREF clrCardBg = isLight ? RGB(255, 255, 255) : RGB(42, 42, 45);
+        COLORREF clrCardHover = isLight ? RGB(235, 242, 255) : RGB(55, 58, 65);
+        COLORREF clrCardBorder = isLight ? RGB(215, 215, 220) : RGB(65, 65, 70);
+        COLORREF clrCardDropBorder = RGB(0, 120, 215);
+        COLORREF clrText = isLight ? RGB(20, 20, 20) : RGB(240, 240, 240);
+        COLORREF clrTextDisabled = RGB(150, 150, 150);
+
+        int gap = 6;
+        int availW = rc.right - rc.left - 8 - 3 * gap;
+        int colW = (availW > 0) ? (availW / 4) : 60;
+        int availH = rc.bottom - rc.top - 20 - gap;
+        int rowH = (availH > 0) ? (availH / 2) : 30;
+
+        // Column headers
+        SelectObject(memDC, hFontSmall);
+        SetTextColor(memDC, clrHeader);
+        for (int c = 0; c < 4; c++) {
+            int x = 4 + c * (colW + gap);
+            RECT rcHeader = { x, 1, x + colW, 15 };
+            WCHAR szColHeader[16];
+            swprintf_s(szColHeader, L"%d열", c + 1);
+            DrawTextW(memDC, szColHeader, -1, &rcHeader, DT_CENTER | DT_SINGLELINE);
+        }
+
+        // Draw slots
+        SelectObject(memDC, hFont);
+        for (int i = 0; i < METRIC_COUNT; i++) {
+            int col = i / 2;
+            int row = i % 2;
+            int x = 4 + col * (colW + gap);
+            int y = 16 + row * (rowH + gap);
+            RECT rcSlot = { x, y, x + colW, y + rowH };
+
+            bool isEnabled = s_dlgMetrics[i].enabled;
+            bool isDrop = (s_bDragging && s_iDropSlot == i && s_iDragSlot != i);
+            bool isHover = (!s_bDragging && s_iHoverSlot == i);
+
+            HBRUSH hBrushCard = CreateSolidBrush(isHover ? clrCardHover : clrCardBg);
+            FillRect(memDC, &rcSlot, hBrushCard);
+            DeleteObject(hBrushCard);
+
+            HPEN hPenBorder = CreatePen(PS_SOLID, isDrop ? 2 : 1, isDrop ? clrCardDropBorder : clrCardBorder);
+            HPEN oldPen = (HPEN)SelectObject(memDC, hPenBorder);
+            HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, GetStockObject(NULL_BRUSH));
+            Rectangle(memDC, rcSlot.left, rcSlot.top, rcSlot.right, rcSlot.bottom);
+            SelectObject(memDC, oldBrush);
+            SelectObject(memDC, oldPen);
+            DeleteObject(hPenBorder);
+
+            int cbSize = 13;
+            int cbX = x + 6;
+            int cbY = y + (rowH - cbSize) / 2;
+            RECT rcCheck = { cbX, cbY, cbX + cbSize, cbY + cbSize };
+
+            if (isEnabled) {
+                HBRUSH hBrCheck = CreateSolidBrush(RGB(0, 120, 215));
+                FillRect(memDC, &rcCheck, hBrCheck);
+                DeleteObject(hBrCheck);
+
+                SelectObject(memDC, hFontSmall);
+                SetTextColor(memDC, RGB(255, 255, 255));
+                DrawTextW(memDC, L"\u2713", -1, &rcCheck, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            } else {
+                HBRUSH hBrCheck = CreateSolidBrush(isLight ? RGB(250, 250, 250) : RGB(35, 35, 35));
+                FillRect(memDC, &rcCheck, hBrCheck);
+                DeleteObject(hBrCheck);
+                FrameRect(memDC, &rcCheck, (HBRUSH)GetStockObject(GRAY_BRUSH));
+            }
+
+            SelectObject(memDC, isEnabled ? hFontBold : hFont);
+            SetTextColor(memDC, isEnabled ? clrText : clrTextDisabled);
+            RECT rcText = { cbX + cbSize + 6, y, x + colW - 14, y + rowH };
+            DrawTextW(memDC, g_metricMetadata[s_dlgMetrics[i].type].name, -1, &rcText,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+            RECT rcGrip = { x + colW - 12, y, x + colW - 2, y + rowH };
+            SelectObject(memDC, hFontSmall);
+            SetTextColor(memDC, RGB(170, 170, 170));
+            DrawTextW(memDC, L"\u22EE", -1, &rcGrip, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+
+        BitBlt(hdc, 0, 0, rc.right, rc.bottom, memDC, 0, 0, SRCCOPY);
+
+        SelectObject(memDC, oldFont);
+        DeleteObject(hFont);
+        DeleteObject(hFontBold);
+        DeleteObject(hFontSmall);
+        SelectObject(memDC, oldBmp);
+        DeleteObject(memBmp);
+        DeleteDC(memDC);
+
+        EndPaint(hWnd, &ps);
+    }
+    break;
+
+    default:
+        return DefWindowProc(hWnd, uMsg, wParam, lParam);
+    }
+    return 0;
+}
+
 INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
     {
     case WM_INITDIALOG:
+    {
+        UpdateTaskbarColors();
         CheckDlgButton(hDlg, IDC_CHK_AUTOSTART, IsAutoStartEnabled() ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_CHK_SCREENSAVER, g_bPreventScreensaver ? BST_CHECKED : BST_UNCHECKED);
-        CheckDlgButton(hDlg, IDC_CHK_NETWORK, g_bShowNetwork ? BST_CHECKED : BST_UNCHECKED);
-        CheckDlgButton(hDlg, IDC_CHK_USAGE, g_bShowUsage ? BST_CHECKED : BST_UNCHECKED);
-        CheckDlgButton(hDlg, IDC_CHK_MEMORY, g_bShowMemory ? BST_CHECKED : BST_UNCHECKED);
-        CheckDlgButton(hDlg, IDC_CHK_TEMP, g_bShowTemp ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_CHK_EFFICIENCY, g_bDisableEfficiency ? BST_CHECKED : BST_UNCHECKED);
+
+        memcpy(s_dlgMetrics, g_metricItems, sizeof(s_dlgMetrics));
+        InvalidateRect(GetDlgItem(hDlg, IDC_CUSTOM_GRID), NULL, FALSE);
+        InvalidateRect(GetDlgItem(hDlg, IDC_STATIC_PREVIEW), NULL, FALSE);
         return (INT_PTR)TRUE;
+    }
+
+    case WM_DRAWITEM:
+    {
+        LPDRAWITEMSTRUCT pDIS = (LPDRAWITEMSTRUCT)lParam;
+        if (pDIS->CtlID == IDC_STATIC_PREVIEW) {
+            RECT rc = pDIS->rcItem;
+            RenderMonitoringDisplay(pDIS->hDC, rc, s_dlgMetrics, true);
+            FrameRect(pDIS->hDC, &rc, GetSysColorBrush(COLOR_3DSHADOW));
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
 
     case WM_COMMAND:
-        if (LOWORD(wParam) == IDOK)
+    {
+        int wmId = LOWORD(wParam);
+        switch (wmId)
+        {
+        case IDOK:
         {
             bool newAutoStart = (IsDlgButtonChecked(hDlg, IDC_CHK_AUTOSTART) == BST_CHECKED);
             if (newAutoStart != IsAutoStartEnabled()) {
@@ -1276,22 +1871,21 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 SetScreensaverBlock(newScreensaver);
             }
 
-            g_bShowNetwork = (IsDlgButtonChecked(hDlg, IDC_CHK_NETWORK) == BST_CHECKED);
-            g_bShowUsage = (IsDlgButtonChecked(hDlg, IDC_CHK_USAGE) == BST_CHECKED);
-            g_bShowMemory = (IsDlgButtonChecked(hDlg, IDC_CHK_MEMORY) == BST_CHECKED);
-            g_bShowTemp = (IsDlgButtonChecked(hDlg, IDC_CHK_TEMP) == BST_CHECKED);
             g_bDisableEfficiency = (IsDlgButtonChecked(hDlg, IDC_CHK_EFFICIENCY) == BST_CHECKED);
+
+            memcpy(g_metricItems, s_dlgMetrics, sizeof(g_metricItems));
             SaveSettings();
             UpdateSysMonitorLayout();
             EndDialog(hDlg, LOWORD(wParam));
             return (INT_PTR)TRUE;
         }
-        else if (LOWORD(wParam) == IDCANCEL)
-        {
+
+        case IDCANCEL:
             EndDialog(hDlg, LOWORD(wParam));
             return (INT_PTR)TRUE;
         }
         break;
+    }
     }
     return (INT_PTR)FALSE;
 }

@@ -154,22 +154,25 @@ END
 // Dialog
 //
 
-IDD_SETTINGS DIALOGEX 0, 0, 170, 190
+IDD_SETTINGS DIALOGEX 0, 0, 290, 248
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "설정"
 FONT 9, "Malgun Gothic", 400, 0, 0x1
 BEGIN
-    GROUPBOX        "시스템 설정",IDC_STATIC,7,7,156,60
-    CONTROL         "윈도우 시작 시 자동 실행",IDC_CHK_AUTOSTART,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,20,140,10
-    CONTROL         "스크린세이버 방지",IDC_CHK_SCREENSAVER,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,35,140,10
-    CONTROL         "크롬/엣지 효율성 모드 해제",IDC_CHK_EFFICIENCY,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,50,140,10
-    GROUPBOX        "모니터링 항목",IDC_STATIC,7,75,156,80
-    CONTROL         "네트워크 속도 (Network)",IDC_CHK_NETWORK,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,88,140,10
-    CONTROL         "CPU / GPU 사용량 (Usage)",IDC_CHK_USAGE,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,103,140,10
-    CONTROL         "메모리 / VRAM (Memory)",IDC_CHK_MEMORY,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,118,140,10
-    CONTROL         "CPU / GPU 온도 (Temp)",IDC_CHK_TEMP,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,133,140,10
-    DEFPUSHBUTTON   "확인",IDOK,57,165,46,14
-    PUSHBUTTON      "취소",IDCANCEL,107,165,46,14
+    GROUPBOX        "시스템 설정",IDC_STATIC,7,7,276,54
+    CONTROL         "윈도우 시작 시 자동 실행",IDC_CHK_AUTOSTART,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,19,115,10
+    CONTROL         "스크린세이버 방지",IDC_CHK_SCREENSAVER,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,140,19,115,10
+    CONTROL         "크롬/엣지 효율성 모드 해제",IDC_CHK_EFFICIENCY,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,33,250,10
+    LTEXT           "* 효율성 모드 해제 시 백그라운드 탭의 미디어 재생 지연을 방지합니다.",IDC_STATIC,14,45,260,10
+
+    GROUPBOX        "모니터링 항목 배치 (클릭: On/Off, 드래그: 위치 이동)",IDC_STATIC,7,64,276,96
+    CONTROL         "",IDC_CUSTOM_GRID,"MetricGridClass",WS_CHILD | WS_VISIBLE | WS_TABSTOP,14,76,262,78
+
+    GROUPBOX        "작업표시줄 미리보기",IDC_STATIC,7,163,276,54
+    CONTROL         "",IDC_STATIC_PREVIEW,"Static",SS_OWNERDRAW | WS_CHILD | WS_VISIBLE,14,175,262,36
+
+    DEFPUSHBUTTON   "확인",IDOK,176,225,50,14
+    PUSHBUTTON      "취소",IDCANCEL,233,225,50,14
 END
 
 /////////////////////////////////////////////////////////////////////////////

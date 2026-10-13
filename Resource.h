@@ -1,4 +1,4 @@
-﻿//{{NO_DEPENDENCIES}}
+//{{NO_DEPENDENCIES}}
 // Microsoft Visual C++에서 생성한 포함 파일입니다.
 // 다음에서 사용 volumecontrol.rc
 
@@ -29,6 +29,11 @@
 #define IDC_CHK_EFFICIENCY      1035
 #define IDC_CHK_AUTOSTART       1040
 #define IDC_CHK_SCREENSAVER     1041
+#define IDC_CUSTOM_GRID         1050
+#define IDC_LIST_METRICS        1050
+#define IDC_BTN_MOVEUP          1051
+#define IDC_BTN_MOVEDOWN        1052
+#define IDC_STATIC_PREVIEW      1053
 
 #define IDD_SHUTDOWNTIMER       1036
 #define IDC_EDIT_HOURS          1037

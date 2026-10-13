@@ -38,3 +38,15 @@ Win32 C++ 프로젝트 개발 시 소프트웨어의 완성도를 높이기 위�
    - `LWA_COLORKEY`를 사용하여 배경을 투명하게 만드는 레이어드 윈도우(Layered Window)에 텍스트를 출력할 때, `CreateFont`의 파라미터로 `CLEARTYPE_QUALITY`를 사용하면 안 됩니다.
    - ClearType의 서브픽셀 렌더링이 배경색과 혼합되면서 투명화 처리(Color Key)가 제대로 되지 않아 글씨 외곽이 번지거나 두껍게 나오는 현상(Color Fringing)이 발생합니다.
    - 이 경우 반드시 `ANTIALIASED_QUALITY`를 사용하여 그레이스케일 안티앨리어싱을 적용함으로써 텍스트 렌더링 품질을 유지하고 투명화가 깔끔하게 되도록 해야 합니다.
+
+5. **Core Audio (WASAPI) 기본 출력 장치 변경 실시간 감지**
+   - Windows에서 사용자가 기본 오디오 출력 장치를 변경(블루투스 이어폰 연결, 헤드셋 전환, 작업표시줄 사운드 출력 전환 등)하더라도, 기존에 획득한 `IAudioEndpointVolume` 인터페이스 포인터는 여전히 유효한 COM 객체로 남아 있어 함수 호출(예: `GetMasterVolumeLevelScalar`)이 정상(`S_OK`) 반환됩니다.
+   - 이 때문에 단순히 오류 발생 여부만 체크해서는 장치 변경을 알아채지 못하고 이전 장치의 볼륨만 계속 조절하는 문제가 발생합니다.
+   - 이를 해결하기 위해 `IMMNotificationClient`를 구현하여 `RegisterEndpointNotificationCallback`을 통해 `OnDefaultDeviceChanged` 콜백을 등록해야 합니다.
+   - 콜백은 백그라운드 RPC/MTA 스레드에서 호출되므로, `PostMessage`나 원자적 플래그(`InterlockedExchange`)를 통해 메인 UI(STA) 스레드로 안전하게 전달한 뒤 새 기본 엔드포인트(`IMMDevice::Activate`)로 볼륨 인터페이스를 재초기화(Re-initialize)해야 합니다.
+   - 또한 주기적 확인 루틴(`EnsureAudio`)에서 현재 기본 장치의 고유 ID(`IMMDevice::GetId`)를 저장된 장치 ID와 비교하는 Fallback 로직을 함께 구현하면 이벤트 누락 시에도 안전하게 복구됩니다.
+
+6. **커스텀 컨트롤을 활용한 2차원 직관적 드래그 앤 드롭 UI 구현**
+   - 표준 Win32 리스트뷰(`SysListView32`)는 2열 이상의 그리드 형태나 실제 출력 영역을 직관적으로 미러링하는 배치 변경 및 실시간 미리보기를 제공하기에 시각적 제약과 깜빡임 문제가 있습니다.
+   - 실제 출력 형태(예: 4열 x 2행 위젯 등)와 동일한 배치를 갖는 커스텀 윈도우 클래스를 등록하고 더블 버퍼링(`CreateCompatibleDC` / `BitBlt`) 기반의 `WM_PAINT`와 드래그 앤 드롭 상태 머신(`WM_LBUTTONDOWN`, 이동 임계값 4px 체크 후 `SetCapture`, 드롭 타깃 피드백, `WM_LBUTTONUP`에서 `std::swap`)을 구현하면 외부 라이브러리 없이도 반응성이 뛰어나고 직관적인 사용자 경험(UX)을 완성할 수 있습니다.
+
