@@ -50,3 +50,8 @@ Win32 C++ 프로젝트 개발 시 소프트웨어의 완성도를 높이기 위�
    - 표준 Win32 리스트뷰(`SysListView32`)는 2열 이상의 그리드 형태나 실제 출력 영역을 직관적으로 미러링하는 배치 변경 및 실시간 미리보기를 제공하기에 시각적 제약과 깜빡임 문제가 있습니다.
    - 실제 출력 형태(예: 4열 x 2행 위젯 등)와 동일한 배치를 갖는 커스텀 윈도우 클래스를 등록하고 더블 버퍼링(`CreateCompatibleDC` / `BitBlt`) 기반의 `WM_PAINT`와 드래그 앤 드롭 상태 머신(`WM_LBUTTONDOWN`, 이동 임계값 4px 체크 후 `SetCapture`, 드롭 타깃 피드백, `WM_LBUTTONUP`에서 `std::swap`)을 구현하면 외부 라이브러리 없이도 반응성이 뛰어나고 직관적인 사용자 경험(UX)을 완성할 수 있습니다.
 
+7. **고DPI 및 다중 모니터 환경에서의 폰트/창 비트맵 스트레칭 방지 (Per-Monitor V2 DPI & MulDiv 스케일링)**
+   - 구형 API인 `SetProcessDPIAware()`는 프로세스를 단일 시스템 DPI에 고정시킵니다. 이로 인해 다중 모니터(배율 불일치), 절전 모드(Sleep) 복귀, 화면 해상도/배율 변경 시 Windows DWM이 창을 강제로 비트맵 확대/축소(Bitmap Stretching)하여 폰트가 저해상도 이미지처럼 뭉개지고 블러(Blur) 처리되는 현상이 간헐적으로 발생합니다.
+   - 반드시 런타임에 `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`를 최우선 적용(실패 시 `SetProcessDpiAwareness` -> `SetProcessDPIAware` Fallback)하여 DWM 가상화 확대를 원천 차단해야 합니다.
+   - 또한 모든 폰트 높이(`CreateFontW`) 및 윈도우 배치 좌표/패딩은 `-MulDiv(기본픽셀, dpi, 96)`로 현재 모니터의 실제 DPI(`GetDpiForWindow`)에 비례하여 동적으로 계산하고, `WM_DPICHANGED`와 `WM_SETTINGCHANGE` / `WM_THEMECHANGED` 메시지를 핸들링하여 배율 및 테마 변화 시 레이아웃과 폰트를 즉시 갱신해야 합니다.
+

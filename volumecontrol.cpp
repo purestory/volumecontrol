@@ -157,7 +157,8 @@ bool IsWindowsLightTheme() {
 
 void UpdateTaskbarColors() {
     bool isLight = IsWindowsLightTheme();
-    g_taskbarBgColor = isLight ? RGB(243, 243, 243) : RGB(32, 32, 32);
+    COLORREF defaultColor = isLight ? RGB(243, 243, 243) : RGB(32, 32, 32);
+    g_taskbarBgColor = defaultColor;
 
     HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", NULL);
     if (hTaskbar) {
@@ -169,11 +170,92 @@ void UpdateTaskbarColors() {
         if (hdcScreen) {
             COLORREF sampled = GetPixel(hdcScreen, x, y);
             if (sampled != CLR_INVALID && sampled != 0) {
-                g_taskbarBgColor = sampled;
+                int r = GetRValue(sampled);
+                int g = GetGValue(sampled);
+                int b = GetBValue(sampled);
+                int brightness = (r * 299 + g * 587 + b * 114) / 1000;
+                int maxDiff = abs(r - g);
+                if (abs(g - b) > maxDiff) maxDiff = abs(g - b);
+                if (abs(b - r) > maxDiff) maxDiff = abs(b - r);
+
+                // 원색 계열(아이콘/알림 등)이 아니고 테마 밝기와 부합할 때만 샘플링 색상 채택
+                if (maxDiff < 40) {
+                    if (isLight && brightness >= 160) {
+                        g_taskbarBgColor = sampled;
+                    } else if (!isLight && brightness <= 90) {
+                        g_taskbarBgColor = sampled;
+                    }
+                }
             }
             ReleaseDC(NULL, hdcScreen);
         }
     }
+
+    // 모니터링 창이 이미 생성되어 있다면 ColorKey를 동기화하여 경계선 찌꺼기 방지
+    extern HWND g_hSysMonitorWnd;
+    if (g_hSysMonitorWnd && IsWindow(g_hSysMonitorWnd)) {
+        SetLayeredWindowAttributes(g_hSysMonitorWnd, g_taskbarBgColor, 0, LWA_COLORKEY);
+    }
+}
+
+// DPI 헬퍼 함수 선언 및 구현
+void InitDpiAwareness()
+{
+    // 1. Windows 10 1703 (Creators Update) 이상: Per-Monitor V2
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32) {
+        typedef BOOL (WINAPI *SetProcessDpiAwarenessContextProc)(HANDLE);
+        SetProcessDpiAwarenessContextProc setContext = 
+            (SetProcessDpiAwarenessContextProc)GetProcAddress(hUser32, "SetProcessDpiAwarenessContext");
+        if (setContext) {
+            // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ((HANDLE)-4)
+            if (setContext((HANDLE)-4)) {
+                return;
+            }
+        }
+    }
+
+    // 2. Windows 8.1 이상: PROCESS_PER_MONITOR_DPI_AWARE
+    HMODULE hShcore = LoadLibraryW(L"shcore.dll");
+    if (hShcore) {
+        typedef enum {
+            PROCESS_DPI_UNAWARE = 0,
+            PROCESS_SYSTEM_DPI_AWARE = 1,
+            PROCESS_PER_MONITOR_DPI_AWARE = 2
+        } PROCESS_DPI_AWARENESS;
+        typedef HRESULT (WINAPI *SetProcessDpiAwarenessProc)(PROCESS_DPI_AWARENESS);
+        SetProcessDpiAwarenessProc setDpiAwareness = 
+            (SetProcessDpiAwarenessProc)GetProcAddress(hShcore, "SetProcessDpiAwareness");
+        if (setDpiAwareness) {
+            if (SUCCEEDED(setDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE))) {
+                FreeLibrary(hShcore);
+                return;
+            }
+        }
+        FreeLibrary(hShcore);
+    }
+
+    // 3. Windows Vista 이상: System DPI Aware fallback
+    SetProcessDPIAware();
+}
+
+UINT GetWindowDpi(HWND hWnd)
+{
+    typedef UINT (WINAPI *GetDpiForWindowProc)(HWND);
+    static GetDpiForWindowProc pGetDpiForWindow = (GetDpiForWindowProc)GetProcAddress(
+        GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+    if (pGetDpiForWindow && hWnd && IsWindow(hWnd)) {
+        UINT dpi = pGetDpiForWindow(hWnd);
+        if (dpi > 0) return dpi;
+    }
+
+    HDC hdc = GetDC(hWnd);
+    if (hdc) {
+        int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
+        ReleaseDC(hWnd, hdc);
+        if (dpi > 0) return (UINT)dpi;
+    }
+    return 96;
 }
 
 // Function declarations
@@ -241,8 +323,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(lpCmdLine);
     UNREFERENCED_PARAMETER(nCmdShow);
 
-    // DPI 인식을 활성화하여 높은 DPI 화면에서 폰트가 번지거나 흐릿하게 보이는 현상 방지
-    SetProcessDPIAware();
+    // Per-Monitor V2 DPI 인식을 활성화하여 다중 모니터 및 배율 변경 시 DWM 비트맵 스트레칭 방지
+    InitDpiAwareness();
 
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&icc);
@@ -413,11 +495,12 @@ void PositionVolumeWindow()
         mi.rcWork.top = 0;
     }
 
-    const int width = 300;
-    const int height = 50;
+    UINT dpi = GetWindowDpi(g_hVolumeWnd);
+    int width = MulDiv(300, dpi, 96);
+    int height = MulDiv(50, dpi, 96);
     // Python: x = screen_width - width - 20, y = screen_height - 110 (physical screen bottom)
-    int x = mi.rcMonitor.right - width - 20;
-    int y = mi.rcMonitor.bottom - 110;
+    int x = mi.rcMonitor.right - width - MulDiv(20, dpi, 96);
+    int y = mi.rcMonitor.bottom - MulDiv(110, dpi, 96);
 
     SetWindowPos(g_hVolumeWnd, HWND_TOPMOST, x, y, width, height,
         SWP_NOACTIVATE | SWP_NOZORDER);
@@ -1005,6 +1088,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         EnsureAudio();
         return 0;
 
+    case WM_SETTINGCHANGE:
+    case WM_THEMECHANGED:
+        UpdateTaskbarColors();
+        UpdateSysMonitorLayout();
+        if (g_hSysMonitorWnd && IsWindow(g_hSysMonitorWnd)) {
+            InvalidateRect(g_hSysMonitorWnd, NULL, TRUE);
+        }
+        break;
+
     case WM_TRAYICON:
         if (lParam == WM_RBUTTONUP) {
             ShowTrayMenu(hWnd);
@@ -1098,14 +1190,21 @@ LRESULT CALLBACK VolumeWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
         FillRect(hdc, &rcClient, hBrushBg);
         DeleteObject(hBrushBg);
 
-        RECT rcBarBg = { 20, 15, rcClient.right - 20, 25 };
+        int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
+        if (dpi <= 0) dpi = 96;
+
+        int marginX = MulDiv(20, dpi, 96);
+        int barTop = MulDiv(15, dpi, 96);
+        int barBottom = MulDiv(25, dpi, 96);
+
+        RECT rcBarBg = { marginX, barTop, rcClient.right - marginX, barBottom };
         HBRUSH hBrushBarBg = CreateSolidBrush(RGB(64, 64, 64));
         FillRect(hdc, &rcBarBg, hBrushBarBg);
         DeleteObject(hBrushBarBg);
 
-        int barWidth = (int)((rcClient.right - 40) * g_nCurrentVolume / 100.0);
+        int barWidth = (int)((rcClient.right - marginX * 2) * g_nCurrentVolume / 100.0);
         if (barWidth > 0) {
-            RECT rcBar = { 20, 15, 20 + barWidth, 25 };
+            RECT rcBar = { marginX, barTop, marginX + barWidth, barBottom };
             HBRUSH hBrushBar = CreateSolidBrush(RGB(255, 255, 255));
             FillRect(hdc, &rcBar, hBrushBar);
             DeleteObject(hBrushBar);
@@ -1114,7 +1213,8 @@ LRESULT CALLBACK VolumeWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, RGB(255, 255, 255));
 
-        HFONT hFont = CreateFont(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        int fontHeight = -MulDiv(14, dpi, 96);
+        HFONT hFont = CreateFontW(fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
         HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
@@ -1122,7 +1222,7 @@ LRESULT CALLBACK VolumeWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
         WCHAR szVolume[32];
         swprintf_s(szVolume, L"Volume: %d%%", g_nCurrentVolume);
 
-        RECT rcText = { 0, 30, rcClient.right, 45 };
+        RECT rcText = { 0, MulDiv(30, dpi, 96), rcClient.right, MulDiv(45, dpi, 96) };
         DrawText(hdc, szVolume, -1, &rcText, DT_CENTER | DT_SINGLELINE);
 
         SelectObject(hdc, hOldFont);
@@ -1232,7 +1332,7 @@ void GetMetricDisplay(MetricType type, const HardwareData* pData, DWORD memLoad,
     }
 }
 
-int CalculateColumnsLayout(const MetricItem* items, int count, int startX, int colSpacing, std::vector<ColumnLayout>& outCols)
+int CalculateColumnsLayout(const MetricItem* items, int count, int startX, int colSpacing, std::vector<ColumnLayout>& outCols, UINT dpi = 96)
 {
     outCols.clear();
     int currentX = startX;
@@ -1252,8 +1352,10 @@ int CalculateColumnsLayout(const MetricItem* items, int count, int startX, int c
         c.topItemIndex = topEn ? topIdx : -1;
         c.bottomItemIndex = btmEn ? btmIdx : -1;
 
-        int wTop = topEn ? g_metricMetadata[items[topIdx].type].defaultWidth : 0;
-        int wBtm = btmEn ? g_metricMetadata[items[btmIdx].type].defaultWidth : 0;
+        int wTopRaw = topEn ? g_metricMetadata[items[topIdx].type].defaultWidth : 0;
+        int wBtmRaw = btmEn ? g_metricMetadata[items[btmIdx].type].defaultWidth : 0;
+        int wTop = MulDiv(wTopRaw, dpi, 96);
+        int wBtm = MulDiv(wBtmRaw, dpi, 96);
         c.width = (wTop > wBtm) ? wTop : wBtm;
 
         outCols.push_back(c);
@@ -1274,14 +1376,18 @@ void RenderMonitoringDisplay(HDC hdc, const RECT& rc, const MetricItem* items, b
 
     SetBkMode(hdc, TRANSPARENT);
 
-    HFONT hFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
+    if (dpi <= 0) dpi = 96;
+    int fontHeight = -MulDiv(12, dpi, 96);
+
+    HFONT hFont = CreateFontW(fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
         ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Malgun Gothic");
     HFONT oldFont = (HFONT)SelectObject(hdc, hFont);
 
     TEXTMETRICW tm;
     GetTextMetricsW(hdc, &tm);
-    int lineH = tm.tmHeight + 2;
+    int lineH = tm.tmHeight + MulDiv(2, dpi, 96);
     int totalTextH = lineH * 2;
     int yStart = (rc.bottom - rc.top - totalTextH) / 2;
     if (yStart < 1) yStart = 1;
@@ -1298,17 +1404,18 @@ void RenderMonitoringDisplay(HDC hdc, const RECT& rc, const MetricItem* items, b
     DWORD memLoad = ms.dwMemoryLoad;
 
     std::vector<ColumnLayout> cols;
-    int startX = rc.left + 10;
-    CalculateColumnsLayout(items, METRIC_COUNT, startX, 20, cols);
+    int startX = rc.left + MulDiv(10, dpi, 96);
+    int colSpacing = MulDiv(20, dpi, 96);
+    CalculateColumnsLayout(items, METRIC_COUNT, startX, colSpacing, cols, dpi);
 
     if (cols.empty()) {
         SetTextColor(hdc, isLight ? RGB(120, 120, 120) : RGB(160, 160, 160));
-        RECT rcEmpty = { rc.left + 10, r1, rc.right - 10, r1 + lineH };
+        RECT rcEmpty = { rc.left + MulDiv(10, dpi, 96), r1, rc.right - MulDiv(10, dpi, 96), r1 + lineH };
         DrawTextW(hdc, L"표시할 모니터링 항목이 없습니다.", -1, &rcEmpty, DT_LEFT | DT_SINGLELINE);
     }
     else if (!isPreview && (!g_pHWData || g_pHWData->MemUsedGB <= 0.0f)) {
         SetTextColor(hdc, isLight ? RGB(100, 100, 100) : RGB(160, 160, 160));
-        RECT rcWait = { rc.left + 6, r1, rc.right, r1 + lineH };
+        RECT rcWait = { rc.left + MulDiv(6, dpi, 96), r1, rc.right, r1 + lineH };
         DrawTextW(hdc, L"Waiting for hardware data...", -1, &rcWait, DT_LEFT | DT_SINGLELINE);
     }
     else {
@@ -1349,6 +1456,18 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 {
     switch (message)
     {
+    case WM_DPICHANGED:
+        UpdateSysMonitorLayout();
+        InvalidateRect(hWnd, NULL, TRUE);
+        return 0;
+
+    case WM_SETTINGCHANGE:
+    case WM_THEMECHANGED:
+        UpdateTaskbarColors();
+        UpdateSysMonitorLayout();
+        InvalidateRect(hWnd, NULL, TRUE);
+        return 0;
+
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
 
@@ -1517,18 +1636,22 @@ void UpdateSysMonitorLayout()
 {
     if (!g_hSysMonitorWnd) return;
 
+    UINT dpi = GetWindowDpi(g_hSysMonitorWnd);
+    int startX = MulDiv(10, dpi, 96);
+    int colSpacing = MulDiv(20, dpi, 96);
+
     std::vector<ColumnLayout> cols;
-    int contentWidth = CalculateColumnsLayout(g_metricItems, METRIC_COUNT, 10, 20, cols);
+    int contentWidth = CalculateColumnsLayout(g_metricItems, METRIC_COUNT, startX, colSpacing, cols, dpi);
     int newWidth = 0;
     if (contentWidth > 0) {
-        newWidth = 10 + contentWidth + 12;
+        newWidth = startX + contentWidth + MulDiv(12, dpi, 96);
     } else {
-        newWidth = 100;
+        newWidth = MulDiv(100, dpi, 96);
     }
 
     HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", NULL);
     int xPos = 0, yPos = 0;
-    int height = 40;
+    int height = MulDiv(40, dpi, 96);
 
     if (hTaskbar) {
         HWND hCurrentOwner = GetWindow(g_hSysMonitorWnd, GW_OWNER);
@@ -1540,11 +1663,12 @@ void UpdateSysMonitorLayout()
         RECT rcTaskbar;
         GetWindowRect(hTaskbar, &rcTaskbar);
         height = rcTaskbar.bottom - rcTaskbar.top;
-        if (height < 36) height = 36;
+        int minH = MulDiv(36, dpi, 96);
+        if (height < minH) height = minH;
         
         yPos = rcTaskbar.top;
 
-        xPos = rcTaskbar.right - newWidth - 240;
+        xPos = rcTaskbar.right - newWidth - MulDiv(240, dpi, 96);
 
         HWND hTrayNotify = FindWindowExW(hTaskbar, NULL, L"TrayNotifyWnd", NULL);
         if (hTrayNotify) {
@@ -1552,7 +1676,7 @@ void UpdateSysMonitorLayout()
             GetWindowRect(hTrayNotify, &rcTrayNotify);
             
             if (rcTrayNotify.left > rcTaskbar.left + newWidth) {
-                xPos = rcTrayNotify.left - newWidth - 8;
+                xPos = rcTrayNotify.left - newWidth - MulDiv(8, dpi, 96);
             }
         }
         if (xPos < 0) xPos = 0;
@@ -1712,13 +1836,18 @@ LRESULT CALLBACK MetricGridWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
 
         SetBkMode(memDC, TRANSPARENT);
 
-        HFONT hFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        int dpi = GetDeviceCaps(memDC, LOGPIXELSY);
+        if (dpi <= 0) dpi = 96;
+        int fontH = -MulDiv(12, dpi, 96);
+        int fontHSmall = -MulDiv(10, dpi, 96);
+
+        HFONT hFont = CreateFontW(fontH, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
             ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Malgun Gothic");
-        HFONT hFontBold = CreateFontW(-12, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        HFONT hFontBold = CreateFontW(fontH, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
             ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Malgun Gothic");
-        HFONT hFontSmall = CreateFontW(-10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        HFONT hFontSmall = CreateFontW(fontHSmall, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
             ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Malgun Gothic");
         HFONT oldFont = (HFONT)SelectObject(memDC, hFont);
