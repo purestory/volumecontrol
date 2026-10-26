@@ -96,6 +96,7 @@ UINT_PTR g_nShutdownTimerId = 0;
 
 // SysMonitor globals
 HWND g_hSysMonitorWnd = NULL;
+bool g_bMenuOpen = false;
 
 // 공유 메모리 구조체 (LHMWrapper C#과 동일한 레이아웃)
 #pragma pack(push, 4)
@@ -824,11 +825,34 @@ void ShowTrayMenu(HWND hWnd)
 
     POINT pt;
     GetCursorPos(&pt);
-    SetForegroundWindow(hWnd);
-    TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hWnd, NULL);
-    PostMessage(hWnd, WM_NULL, 0, 0);
 
+    // 메뉴가 열려 있는 동안 타이머에 의한 Z-order 재배치 방지
+    g_bMenuOpen = true;
+
+    // 포그라운드로 활성화 (외부 클릭 시 닫힘 보장 및 포커스 획득)
+    SetForegroundWindow(hWnd);
+
+    TPMPARAMS tpm = { sizeof(TPMPARAMS) };
+    // 모니터링 창 영역을 배제 영역(rcExclude)으로 설정하여 메뉴가 모니터링 화면을 덮지 않도록 방지
+    if (g_hSysMonitorWnd && IsWindow(g_hSysMonitorWnd)) {
+        GetWindowRect(g_hSysMonitorWnd, &tpm.rcExclude);
+    }
+
+    UINT cmd = TrackPopupMenuEx(
+        hMenu,
+        TPM_RETURNCMD | TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON,
+        pt.x, pt.y,
+        hWnd,
+        &tpm
+    );
+
+    PostMessage(hWnd, WM_NULL, 0, 0);
+    g_bMenuOpen = false;
     DestroyMenu(hMenu);
+
+    if (cmd != 0) {
+        SendMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(cmd, 0), 0);
+    }
 }
 
 bool IsAutoStartEnabled()
@@ -1468,6 +1492,9 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
         InvalidateRect(hWnd, NULL, TRUE);
         return 0;
 
+    case WM_NCHITTEST:
+        return HTCLIENT;
+
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
 
@@ -1479,7 +1506,10 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
     }
 
     case WM_RBUTTONUP:
-        ShowTrayMenu(g_hWnd);
+        ShowTrayMenu(hWnd);
+        return 0;
+
+    case WM_CONTEXTMENU:
         return 0;
 
     case WM_ERASEBKGND:
@@ -1487,6 +1517,11 @@ LRESULT CALLBACK SysMonitorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 
     case WM_TIMER:
         if (wParam == 3) {
+            if (g_bMenuOpen) {
+                // 메뉴가 열려 있는 동안에는 Z-order 변경 및 레이아웃 재배치 방지
+                return 0;
+            }
+
             if (IsFullscreenAppRunning()) {
                 if (IsWindowVisible(hWnd)) {
                     ShowWindow(hWnd, SW_HIDE);
@@ -1681,9 +1716,16 @@ void UpdateSysMonitorLayout()
         }
         if (xPos < 0) xPos = 0;
     }
-    // SWP_NOZORDER를 제거하고 HWND_TOPMOST를 지정하여 작업표시줄 뒤로 숨는 현상 방지
-    SetWindowPos(g_hSysMonitorWnd, HWND_TOPMOST, xPos, yPos, newWidth, height, SWP_NOACTIVATE);
-    InvalidateRect(g_hSysMonitorWnd, NULL, TRUE);
+    static int s_lastX = -1, s_lastY = -1, s_lastW = -1, s_lastH = -1;
+    if (s_lastX != xPos || s_lastY != yPos || s_lastW != newWidth || s_lastH != height) {
+        s_lastX = xPos;
+        s_lastY = yPos;
+        s_lastW = newWidth;
+        s_lastH = height;
+        // SWP_NOZORDER를 제거하고 HWND_TOPMOST를 지정하여 작업표시줄 뒤로 숨는 현상 방지
+        SetWindowPos(g_hSysMonitorWnd, HWND_TOPMOST, xPos, yPos, newWidth, height, SWP_NOACTIVATE);
+        InvalidateRect(g_hSysMonitorWnd, NULL, TRUE);
+    }
 }
 
 static MetricItem s_dlgMetrics[METRIC_COUNT];
