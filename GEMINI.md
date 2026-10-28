@@ -35,6 +35,18 @@ AI 에이전트(당신)가 개발 중 **실제로 저질렀던 치명적인 실�
 - **배포 산출물 중복 생성 및 패치 수정 시 버전(Version) 미갱신 금지**:
   - 배포 아카이브는 중복 파일 없이 **단일 표준 버전 명칭(예: `VolumeControl_v1.0.1_Portable.zip`) 딱 1개만** 정갈하게 생성할 것.
   - 코드/리소스 수정 및 배포가 발생하면 반드시 **시맨틱 버저닝(SemVer) 규칙에 따라 버전 번호를 명확히 상향(`v1.0.0` ➡️ `v1.0.1`)**하여 릴리스할 것.
+- **설치 프로그램(Setup.exe) 생성 시 외부 도구 탐색 낭비 금지 및 EasyInstall 표준 파이프라인 준수**:
+  - **실제 실수**: 설치 프로그램(Setup.exe) 생성 지시를 받았을 때, 프로젝트 환경에 구축된 자체 빌더를 확인하지 않고 Inno Setup(`iscc`), NSIS(`makensis`) 등 엉뚱한 외부 도구를 찾으며 헤매고 시간을 지체함. 동일 워크스페이스 그룹(`D:\coding\visualstudio\easyinstall`)에 전용 인스톨러 빌더가 이미 완성되어 있음에도 이를 즉시 활용하지 못함.
+  - **방지 원칙 (표준 배포 패키징 파이프라인)**:
+    1. **단일 설치 파일 빌더 절대 경로**:  
+       `& "D:\coding\visualstudio\easyinstall\bin\Release\easyinstall.exe" -i "<입력_바이너리_또는_폴더>" -o "<출력경로>\Setup.exe" -n "<프로그램명>" -v "<버전>" -p "purestory" -m "<메인_exe명>"`  
+       *(예: `& "D:\coding\visualstudio\easyinstall\bin\Release\easyinstall.exe" -i "D:\coding\visualstudio\clearMax\build\Release\clearMax.exe" -o "D:\coding\visualstudio\clearMax\ClearMax_Setup.exe" -n "clearMax" -v "1.14" -p "purestory" -m "clearMax.exe"`)*
+    2. **무설치 포터블 압축 아카이브 생성**:  
+       `powershell -Command "Compress-Archive -Path '<바이너리_경로>' -DestinationPath '<출력경로>\<프로그램명>_portable.zip' -Force"`
+    3. **GitHub Release 자동 배포 규격**:  
+       `gh release create <버전태그> <Setup.exe> <portable.zip> -F <릴리스노트.md> -t "<버전태그>"`
+    4. 설치 파일 생성 요구 시 타사 도구(`iscc`, `makensis` 등)를 일절 찾지 말고, 위 `easyinstall.exe` 절대 경로를 이용하여 즉시 1초 만에 원스톱으로 빌드할 것.
+
 
 ### 🛠️ 도구 사용 실수 방지: `replace_file_content` 줄 번호 포함 금지
 - **실제 실수**: `view_file`로 확인한 내용 앞의 줄 번호(`136: `, `150: ` 등)를 복사해 `TargetContent`나 `ReplacementContent`에 전달했다가 `chunk 0: target content not found` 에러를 반복 유발함.
