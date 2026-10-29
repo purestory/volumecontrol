@@ -13,6 +13,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define MAX_LOADSTRING 100
 #define WM_APP_VOLUME_WHEEL   (WM_APP + 1)
 #define WM_APP_DEVICE_CHANGED (WM_APP + 2)
+#define WM_APP_SHOW_MONITOR_MENU (WM_APP + 3)
 
 #define VOLUME_DELTA        0.02f
 #define VOLUME_THROTTLE_MS  50
@@ -809,6 +810,8 @@ void RemoveTrayIcon()
 
 void ShowTrayMenu(HWND hWnd)
 {
+    if (g_bMenuOpen) return;
+
     HMENU hMenu = CreatePopupMenu();
     if (g_bShutdownTimerActive) {
         int h = g_shutdownTimerSecondsLeft / 3600;
@@ -833,14 +836,28 @@ void ShowTrayMenu(HWND hWnd)
     SetForegroundWindow(hWnd);
 
     TPMPARAMS tpm = { sizeof(TPMPARAMS) };
+    UINT uAlign = TPM_BOTTOMALIGN;
+
     // 모니터링 창 영역을 배제 영역(rcExclude)으로 설정하여 메뉴가 모니터링 화면을 덮지 않도록 방지
     if (g_hSysMonitorWnd && IsWindow(g_hSysMonitorWnd)) {
         GetWindowRect(g_hSysMonitorWnd, &tpm.rcExclude);
+        // 커서가 모니터링 창 영역 내부를 클릭한 경우 배제 영역 충돌을 방지하고 외곽에 밀착되도록 좌표 조정
+        if (PtInRect(&tpm.rcExclude, pt)) {
+            if (tpm.rcExclude.top < 100) {
+                // 상단 작업표시줄인 경우: 모니터링 창 아래로 표시
+                pt.y = tpm.rcExclude.bottom;
+                uAlign = TPM_TOPALIGN;
+            } else {
+                // 일반적인 하단 작업표시줄: 모니터링 창 위로 표시
+                pt.y = tpm.rcExclude.top;
+                uAlign = TPM_BOTTOMALIGN;
+            }
+        }
     }
 
     UINT cmd = TrackPopupMenuEx(
         hMenu,
-        TPM_RETURNCMD | TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON,
+        TPM_RETURNCMD | TPM_LEFTALIGN | uAlign | TPM_RIGHTBUTTON,
         pt.x, pt.y,
         hWnd,
         &tpm
@@ -1066,19 +1083,55 @@ bool IsMouseOnTaskbar(POINT pt)
 
 LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-    if (nCode == HC_ACTION && wParam == WM_MOUSEWHEEL) {
-        MSLLHOOKSTRUCT* pMouseStruct = (MSLLHOOKSTRUCT*)lParam;
-        POINT pt = pMouseStruct->pt;
+    static bool s_bRightClickOnMonitor = false;
 
-        if (!IsMouseOnTaskbar(pt) || IsFullscreenAppRunning()) {
-            return CallNextHookEx(g_hMouseHook, nCode, wParam, lParam);
+    if (nCode == HC_ACTION) {
+        if (wParam == WM_MOUSEWHEEL) {
+            MSLLHOOKSTRUCT* pMouseStruct = (MSLLHOOKSTRUCT*)lParam;
+            POINT pt = pMouseStruct->pt;
+
+            if (!IsMouseOnTaskbar(pt) || IsFullscreenAppRunning()) {
+                return CallNextHookEx(g_hMouseHook, nCode, wParam, lParam);
+            }
+
+            short zDelta = (short)HIWORD(pMouseStruct->mouseData);
+
+            if (g_hWnd && IsWindow(g_hWnd)) {
+                PostMessageW(g_hWnd, WM_APP_VOLUME_WHEEL, (WPARAM)zDelta, 0);
+                return 1;
+            }
         }
+        else if (wParam == WM_RBUTTONDOWN) {
+            MSLLHOOKSTRUCT* pMouseStruct = (MSLLHOOKSTRUCT*)lParam;
+            POINT pt = pMouseStruct->pt;
 
-        short zDelta = (short)HIWORD(pMouseStruct->mouseData);
+            if (g_hSysMonitorWnd && IsWindow(g_hSysMonitorWnd) && IsWindowVisible(g_hSysMonitorWnd)) {
+                RECT rcMon = { 0 };
+                GetWindowRect(g_hSysMonitorWnd, &rcMon);
+                if (PtInRect(&rcMon, pt)) {
+                    s_bRightClickOnMonitor = true;
+                    return 1; // 작업표시줄로 우클릭 누름이 전달되는 것을 방지
+                }
+            }
+            s_bRightClickOnMonitor = false;
+        }
+        else if (wParam == WM_RBUTTONUP) {
+            if (s_bRightClickOnMonitor) {
+                s_bRightClickOnMonitor = false;
+                MSLLHOOKSTRUCT* pMouseStruct = (MSLLHOOKSTRUCT*)lParam;
+                POINT pt = pMouseStruct->pt;
 
-        if (g_hWnd && IsWindow(g_hWnd)) {
-            PostMessageW(g_hWnd, WM_APP_VOLUME_WHEEL, (WPARAM)zDelta, 0);
-            return 1;
+                if (g_hSysMonitorWnd && IsWindow(g_hSysMonitorWnd) && IsWindowVisible(g_hSysMonitorWnd)) {
+                    RECT rcMon = { 0 };
+                    GetWindowRect(g_hSysMonitorWnd, &rcMon);
+                    if (PtInRect(&rcMon, pt)) {
+                        if (g_hWnd && IsWindow(g_hWnd)) {
+                            PostMessageW(g_hWnd, WM_APP_SHOW_MONITOR_MENU, 0, 0);
+                        }
+                        return 1; // 작업표시줄로 우클릭 뗌이 전달되는 것을 방지
+                    }
+                }
+            }
         }
     }
 
@@ -1110,6 +1163,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
     case WM_APP_DEVICE_CHANGED:
         EnsureAudio();
+        return 0;
+
+    case WM_APP_SHOW_MONITOR_MENU:
+        ShowTrayMenu(g_hSysMonitorWnd ? g_hSysMonitorWnd : hWnd);
         return 0;
 
     case WM_SETTINGCHANGE:

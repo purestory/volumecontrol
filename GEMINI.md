@@ -127,15 +127,17 @@ AI 에이전트(당신)가 개발 중 **실제로 저질렀던 치명적인 실�
 - 또한 모든 폰트 높이(`CreateFontW`) 및 윈도우 배치 좌표/패딩은 `-MulDiv(기본픽셀, dpi, 96)`로 현재 모니터의 실제 DPI(`GetDpiForWindow`)에 비례하여 동적으로 계산하고, `WM_DPICHANGED`와 `WM_SETTINGCHANGE` / `WM_THEMECHANGED` 메시지를 핸들링하여 배율 및 테마 변화 시 레이아웃과 폰트를 즉시 갱신해야 함.
 
 ### 🪟 레이어드 윈도우(`WS_EX_LAYERED`) 마우스 클릭 투과 방지 및 팝업 메뉴 Z-Order/배제 영역 보장
-- **레이어드 투명 영역 클릭 투과 버그**:
-  - `LWA_COLORKEY`를 사용하는 레이어드 윈도우는 DWM에 의해 컬러키 색상(투명 배경) 영역이 기본적으로 마우스 통과(`HTTRANSPARENT`) 처리됨.
-  - 이로 인해 텍스트 외곽의 여백을 클릭하면 마우스 이벤트가 뒤쪽 윈도우(작업표시줄 등)로 빠져나가 우클릭 메뉴가 아예 뜨지 않는 현상이 발생함.
-  - 반드시 `WM_NCHITTEST`를 명시적으로 가로채어 `return HTCLIENT;`를 반환함으로써 창 전체 영역에서 마우스 클릭/휠 이벤트를 100% 수신하도록 보장해야 함.
+- **레이어드 투명 영역 클릭 투과 버그 및 DWM 우회 한계**:
+  - `LWA_COLORKEY`를 사용하는 레이어드 윈도우는 Windows DWM에 의해 컬러키 색상(투명 배경) 영역의 마우스 이벤트가 창(`SysMonitorWndProc`)으로 전달되지 않고 뒷 창(`Shell_TrayWnd`)으로 강제 통과(Bypass)됨.
+  - 단순 `WM_NCHITTEST`에서 `HTCLIENT`를 반환하는 것만으로는 DWM의 투명 픽셀 마우스 바이패스를 막을 수 없어, 텍스트가 아닌 여백을 클릭하면 마우스 우클릭 메시지가 아예 들어오지 않는 버그가 발생함.
+  - **해결 원칙**: 상시 동작하는 전역 저수준 마우스 훅(`WH_MOUSE_LL`, `LowLevelMouseProc`)에서 모니터링 창의 화면 사각형(`PtInRect(&rcMon, pt)`)을 검사하여, 모니터링 창 영역 내에서의 마우스 우클릭(`WM_RBUTTONDOWN`, `WM_RBUTTONUP`)을 선제적으로 가로채어(`return 1`) 작업표시줄로의 누수를 차단하고 메인 루프에 비동기 메시지(`WM_APP_SHOW_MONITOR_MENU`)를 전달하여 메뉴를 표출해야 함.
 - **주기적 타이머에 의한 팝업 메뉴 가림 및 Z-Order 역전 방지**:
   - `UpdateSysMonitorLayout` 등에서 매초 `SetWindowPos(..., HWND_TOPMOST)`를 무조건 호출하면, 사용자가 띄운 팝업 메뉴(`#32768`) 위로 모니터링 창이 올라와 메뉴를 가려버리는 치명적인 버그가 발생함.
   - 메뉴가 열려 있는 동안 활성화되는 불리언 가드(`g_bMenuOpen = true`)를 적용하여 메뉴가 떠 있는 동안에는 타이머에 의한 Z-order 재배치 및 무효화를 스킵해야 함.
   - 또한 이전 좌표/크기와 비교하여 실제로 위치나 크기가 변경되었을 때만 `SetWindowPos`를 호출하도록 최적화해야 함.
-- **메뉴 배제 영역 지정 (`TrackPopupMenuEx` + `TPMPARAMS.rcExclude`) 및 올바른 Owner 윈도우 지정**:
-  - 팝업 메뉴 생성 시 `TrackPopupMenu` 대신 `TrackPopupMenuEx`를 사용하고, `TPMPARAMS`의 `rcExclude`에 모니터링 창 RECT를 지정하면 Windows 메뉴 관리자가 자동으로 메뉴를 모니터링 창 영역과 겹치지 않게 바깥쪽(위쪽)으로 밀어내어 표시함.
+- **메뉴 배제 영역 지정 (`TrackPopupMenuEx` + `TPMPARAMS.rcExclude`) 및 커서 좌표 충돌 방지**:
+  - 팝업 메뉴 생성 시 `TrackPopupMenuEx`의 `TPMPARAMS.rcExclude`에 모니터링 창 RECT를 지정하면 메뉴가 모니터링 화면을 가리지 않음.
+  - **주의**: 모니터링 창 내부를 클릭한 경우 마우스 좌표 `pt` 자체가 `rcExclude` 안에 위치하게 되므로, `TPM_BOTTOMALIGN`과 함께 쓰이면 Windows 내부 배제 배치 알고리즘과 충돌하여 메뉴가 즉시 닫히거나 표시되지 않는 문제가 발생함.
+  - 반드시 모니터링 창 내부 클릭 시 `pt.y`를 모니터링 창 상단(`rcExclude.top`, 상단 작업표시줄은 `rcExclude.bottom`)으로 보정하여 메뉴 바닥이 창 외곽에 밀착되어 정갈하게 펼쳐지도록 좌표를 보정해야 함.
   - 또한 메뉴를 띄울 때 숨은 창이 아닌 실제로 눈에 보이는 최상위 윈도우(`g_hSysMonitorWnd`)를 Owner 및 `SetForegroundWindow` 대상으로 넘겨야 포그라운드 활성화가 실패하지 않고, 메뉴 윈도우 역시 최상위(`TOPMOST`) 계층으로 올바르게 생성됨.
 
